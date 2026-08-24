@@ -46,7 +46,7 @@ function Write-Step {
 }
 
 
-function Require-Command {
+function Test-RequiredCommand {
     param(
         [string]$Name,
         [string]$InstallHint
@@ -171,9 +171,9 @@ Write-Host "Repository: $RepositoryRoot"
 Write-Host "Whisper backend: $WhisperBackend"
 
 Write-Step "前提ツールを確認"
-Require-Command "git" "Git for Windowsをインストールしてください。"
-Require-Command "cmake" "CMakeをインストールしてください。"
-Require-Command "dotnet" ".NET SDKと.NET Framework 4.8 Developer Packをインストールしてください。"
+Test-RequiredCommand "git" "Git for Windowsをインストールしてください。"
+Test-RequiredCommand "cmake" "CMakeをインストールしてください。"
+Test-RequiredCommand "dotnet" ".NET SDKと.NET Framework 4.8 Developer Packをインストールしてください。"
 $PythonCommand = Get-PythonCommand
 $VersionArguments = @($PythonCommand.PrefixArguments) + @(
     "-c",
@@ -242,8 +242,8 @@ else {
 }
 
 if ($WhisperBackend -eq "cuda") {
-    Require-Command "nvcc" "CUDA Toolkitをインストールしてください。"
-    Require-Command "ninja" "Ninja Buildをインストールしてください。"
+    Test-RequiredCommand "nvcc" "CUDA Toolkitをインストールしてください。"
+    Test-RequiredCommand "ninja" "Ninja Buildをインストールしてください。"
     Initialize-VisualStudioBuildEnvironment
 }
 
