@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Personal conversation data and generated audio/logs
+conversation_history.jsonl
+input.wav
+whisper_server.log
+*.log
+
+# Local Gemini/API credentials (if created later)
+client_secret*.json
+credentials*.json
+token*.json
+
+# Downloaded third-party source, binaries, and large Whisper models
+whisper.cpp/
+VoicepeakProxyCore-*/
+*.bin
+*.gguf
+
+# .NET build products and IDE state
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
