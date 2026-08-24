@@ -61,6 +61,8 @@ echo $env:GEMINI_API_KEY
 
 VOICEPEAKとこの音声チャットを実行中の場合は、先に終了してください。BridgeのDLLがVOICEPEAKへ読み込まれている間は、Windowsのファイルロックにより再ビルドできません。
 
+`start.bat`も不足ファイルとWhisperのビルド方式を確認し、必要な場合だけ`setup.ps1`を自動実行します。NVIDIA GPU、`nvidia-smi`、CUDAコンパイラーが見つかればCUDA版、それ以外はCPU版を選択します。以下のコマンドは、バックエンドを明示して先にセットアップしたい場合に使用します。
+
 CPU版:
 
 ```powershell
@@ -127,6 +129,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -ForceDownload
 
 ```cmd
 start.bat
+```
+
+初回起動やCPU／CUDA構成が変わった場合は、自動セットアップ後に音声チャットを開始します。すでに正しい構成なら再ビルドしません。
+
+バックエンドを明示する場合:
+
+```cmd
+start.bat --cpu
+start.bat --cuda
+```
+
+起動せず、現在の構成だけ確認する場合:
+
+```cmd
+start.bat --check
 ```
 
 終了するときはコンソールで`Ctrl+C`を押します。
