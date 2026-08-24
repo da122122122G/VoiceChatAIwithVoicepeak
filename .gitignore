@@ -8,6 +8,7 @@ venv/
 .env
 .env.*
 !.env.example
+app_config.json
 
 # Personal conversation data and generated audio/logs
 conversation_history.jsonl
@@ -23,6 +24,7 @@ token*.json
 # Downloaded third-party source, binaries, and large Whisper models
 whisper.cpp/
 VoicepeakProxyCore-*/
+external/VoicepeakProxyCore/
 *.bin
 *.gguf
 
@@ -38,4 +40,3 @@ VoicepeakProxyCore-*/
 Thumbs.db
 .idea/
 .vscode/
-

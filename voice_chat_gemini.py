@@ -22,6 +22,14 @@ from google.genai import types
 
 WHISPER_SESSION = requests.Session()
 
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+
+def repository_path(*parts):
+    return os.path.join(BASE_DIR, *parts)
+
 
 # ============================================================
 # 設定
@@ -31,11 +39,19 @@ WHISPER_SESSION = requests.Session()
 # VOICEPEAK
 # ------------------------------------------------------------
 
-VOICEPEAK_EXE = r"H:\動画\VOICEPEAK\voicepeak.exe"
+APP_CONFIG_FILE = repository_path(
+    "app_config.json"
+)
 
-VOICEPEAK_BRIDGE = (
-    r"C:\voice_ai\voicepeak_proxy_test"
-    r"\bin\Release\net48\VoicepeakProxyTest.exe"
+# 利用者ごとに異なるため、app_config.jsonから起動時に読み込む。
+VOICEPEAK_EXE = None
+
+VOICEPEAK_BRIDGE = repository_path(
+    "voicepeak_proxy_test",
+    "bin",
+    "Release",
+    "net48",
+    "VoicepeakProxyTest.exe",
 )
 
 
@@ -43,14 +59,48 @@ VOICEPEAK_BRIDGE = (
 # Whisper Server
 # ------------------------------------------------------------
 
-WHISPER_SERVER_EXE = (
-    r"C:\voice_ai\whisper.cpp"
-    r"\build\bin\whisper-server.exe"
+WHISPER_SERVER_CANDIDATES = [
+    repository_path(
+        "whisper.cpp",
+        "build-voice-chat",
+        "bin",
+        "Release",
+        "whisper-server.exe",
+    ),
+    repository_path(
+        "whisper.cpp",
+        "build-voice-chat",
+        "bin",
+        "whisper-server.exe",
+    ),
+    repository_path(
+        "whisper.cpp",
+        "build",
+        "bin",
+        "whisper-server.exe",
+    ),
+    repository_path(
+        "whisper.cpp",
+        "build",
+        "bin",
+        "Release",
+        "whisper-server.exe",
+    ),
+]
+
+WHISPER_SERVER_EXE = next(
+    (
+        path
+        for path in WHISPER_SERVER_CANDIDATES
+        if os.path.isfile(path)
+    ),
+    WHISPER_SERVER_CANDIDATES[0],
 )
 
-WHISPER_MODEL = (
-    r"C:\voice_ai\whisper.cpp"
-    r"\models\ggml-small.bin"
+WHISPER_MODEL = repository_path(
+    "whisper.cpp",
+    "models",
+    "ggml-small.bin",
 )
 
 WHISPER_HOST = "127.0.0.1"
@@ -61,7 +111,9 @@ WHISPER_URL = (
     f"{WHISPER_PORT}/inference"
 )
 
-WHISPER_LOG = r"C:\voice_ai\whisper_server.log"
+WHISPER_LOG = repository_path(
+    "whisper_server.log"
+)
 
 # Whisper設定
 WHISPER_THREADS = 8
@@ -76,10 +128,16 @@ WHISPER_START_TIMEOUT = 30.0
 # 録音
 # ------------------------------------------------------------
 
-INPUT_WAV = r"C:\voice_ai\input.wav"
-CONVERSATION_LOG = r"C:\voice_ai\conversation_history.jsonl"
-GEMINI_CONFIG_FILE = r"C:\voice_ai\gemini_config.json"
-SYSTEM_INSTRUCTION_FILE = r"C:\voice_ai\system_instruction.txt"
+INPUT_WAV = repository_path("input.wav")
+CONVERSATION_LOG = repository_path(
+    "conversation_history.jsonl"
+)
+GEMINI_CONFIG_FILE = repository_path(
+    "gemini_config.json"
+)
+SYSTEM_INSTRUCTION_FILE = repository_path(
+    "system_instruction.txt"
+)
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -145,6 +203,91 @@ BRACKETED_TEXT_PATTERN = re.compile(
 KATAKANA_SOUND_PATTERN = re.compile(
     r"^[ァ-ヶー・ッ]{1,8}$"
 )
+
+
+# ============================================================
+# アプリ設定
+# ============================================================
+
+def load_app_settings():
+
+    try:
+        with open(
+            APP_CONFIG_FILE,
+            "r",
+            encoding="utf-8",
+        ) as config_file:
+            settings = json.load(config_file)
+
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            "app_config.jsonが見つかりません。\n"
+            "app_config.example.jsonをコピーし、"
+            "voicepeak_exeを設定してください:\n"
+            f"{APP_CONFIG_FILE}"
+        ) from e
+
+    except (OSError, ValueError) as e:
+        raise RuntimeError(
+            "アプリ設定ファイルを読み込めません: "
+            f"{APP_CONFIG_FILE}"
+        ) from e
+
+    if not isinstance(settings, dict):
+        raise ValueError(
+            "app_config.jsonのルートは"
+            "JSONオブジェクトにしてください。"
+        )
+
+    voicepeak_exe = str(
+        settings.get("voicepeak_exe", "")
+    ).strip()
+
+    if not voicepeak_exe:
+        raise ValueError(
+            "app_config.jsonのvoicepeak_exeへ"
+            "VOICEPEAKの実行ファイルを指定してください。"
+        )
+
+    voicepeak_exe = os.path.expandvars(
+        os.path.expanduser(voicepeak_exe)
+    )
+
+    if not os.path.isabs(voicepeak_exe):
+        voicepeak_exe = repository_path(
+            voicepeak_exe
+        )
+
+    voicepeak_exe = os.path.abspath(
+        voicepeak_exe
+    )
+
+    if not os.path.isfile(voicepeak_exe):
+        raise FileNotFoundError(
+            "VOICEPEAKが見つかりません。"
+            "app_config.jsonのvoicepeak_exeを"
+            "確認してください:\n"
+            f"{voicepeak_exe}"
+        )
+
+    return {
+        "voicepeak_exe": voicepeak_exe,
+    }
+
+
+def initialize_app_settings():
+
+    global VOICEPEAK_EXE
+
+    settings = load_app_settings()
+    VOICEPEAK_EXE = settings[
+        "voicepeak_exe"
+    ]
+
+    print(
+        "アプリ設定: "
+        f"{APP_CONFIG_FILE}"
+    )
 
 
 # ============================================================
@@ -402,7 +545,7 @@ def ensure_voicepeak_running(
     ]
 
 
-    # 正しいHドライブ側が起動中
+    # app_config.jsonで指定したVOICEPEAKが起動中
     if correct_path in normalized_paths:
 
         print()
@@ -424,9 +567,9 @@ def ensure_voicepeak_running(
 
 
         raise RuntimeError(
-            "Cドライブ側ではなく、"
-            "H:\\動画\\VOICEPEAK\\voicepeak.exe "
-            "を起動してください。"
+            "app_config.jsonで指定したVOICEPEAKを"
+            "起動してください:\n"
+            f"{VOICEPEAK_EXE}"
         )
 
 
@@ -437,8 +580,7 @@ def ensure_voicepeak_running(
     # VOICEPEAKが起動していないので自動起動
     print()
     print(
-        "Hドライブ側のVOICEPEAKを"
-        "起動します..."
+        "VOICEPEAKを起動します..."
     )
 
 
@@ -488,8 +630,8 @@ def ensure_voicepeak_running(
 
 
     raise RuntimeError(
-        "Hドライブ側のVOICEPEAKを"
-        "起動できませんでした。"
+        "VOICEPEAKを起動できませんでした:\n"
+        f"{VOICEPEAK_EXE}"
     )
 
 
@@ -1783,6 +1925,13 @@ if __name__ == "__main__":
         print(
             "================================"
         )
+
+        # ----------------------------------------------------
+        # アプリ設定
+        # ----------------------------------------------------
+
+        initialize_app_settings()
+
 
         # ----------------------------------------------------
         # Gemini設定・会話履歴

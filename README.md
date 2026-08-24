@@ -2,250 +2,165 @@
 
 マイクへ話しかけると、Whisperが文字起こしし、Geminiの返答をVOICEPEAKが読み上げるWindows向け音声チャットです。
 
-現在はキー操作不要の常時リスニング方式です。Whisper・Gemini・VOICEPEAKの処理中もマイク入力を続け、次の発話をキューへ保存します。
+キー操作は不要です。Whisper・Gemini・VOICEPEAKの処理中もマイク入力を続け、次の発話をキューへ保存します。
+
+## 主な機能
+
+- 常時リスニングとRMSベースの自動発話検出
+- 起動直後の環境ノイズを基準にした動的な発話閾値
+- 0.3秒のプリロールと末尾無音のトリミング
+- Whisper Serverの自動起動とHTTP接続再利用
+- Geminiとの会話履歴保存・起動時読み込み
+- PCの現在日時とタイムゾーンをGeminiへ通知
+- 効果音表記やWhisperの代表的な誤認識を除外
+- VOICEPEAK Runtime Bridgeへのキュー送信
+- 音声処理中も次の発話を取り込むバックグラウンド録音
 
 ## 必要なもの
 
-- Windows 10 / 11
-- Python 3.12
+- Windows 10 / 11（x64）
+- Python 3.12以降
+- Git for Windows
+- CMake
+- Visual Studio Build Tools 2022
+  - 「C++によるデスクトップ開発」ワークロード
+- .NET SDK
+- .NET Framework 4.8 Developer Pack
+- VOICEPEAK本体
 - Gemini APIキー
-- VOICEPEAK
-- VoicepeakProxyCore
-- whisper.cppとWhisperの`small`モデル
-- Git、CMake、Ninja、Visual Studio Build Tools 2022
-- .NET SDK／.NET Framework 4.8
-- NVIDIA GPUを使用する場合はCUDA Toolkit
+- NVIDIA GPU版を使う場合のみCUDA Toolkit
 
-以下では、作業フォルダを`C:\voice_ai`として説明します。
+VOICEPEAK、Gemini APIキー、OS向け開発ツールは利用者が用意してください。それ以外のPythonパッケージ、whisper.cpp、Whisperモデル、VoicepeakProxyCore、VOICEPEAK Bridgeは`setup.ps1`が準備します。
 
-## 初回セットアップ
+## 最短セットアップ
 
-### 1. Pythonとパッケージ
-
-Python 3.12をインストールし、PowerShellで確認します。
+### 1. リポジトリをclone
 
 ```powershell
-python --version
-python -m pip install numpy sounddevice soundfile requests google-genai
+git clone https://github.com/da122122122G/VoiceChatAIwithVoicepeak.git
+cd VoiceChatAIwithVoicepeak
 ```
 
-### 2. Gemini APIキー
+配置場所は任意です。`C:\voice_ai`へ置く必要はありません。
 
-Gemini APIキーをWindowsの環境変数`GEMINI_API_KEY`へ設定します。
+### 2. Gemini APIキーを設定
 
 ```powershell
 setx GEMINI_API_KEY "ここにAPIキー"
 ```
 
-新しいPowerShellを開き直し、設定を確認します。
+`setx`を実行した後は、新しいPowerShellまたはコマンドプロンプトを開いてください。
+
+確認:
 
 ```powershell
 echo $env:GEMINI_API_KEY
 ```
 
-### 3. VOICEPEAK
+### 3. 自動セットアップを実行
 
-VOICEPEAKをインストールし、Pythonファイルのパスを実際の場所に合わせます。
-
-```python
-VOICEPEAK_EXE = r"H:\動画\VOICEPEAK\voicepeak.exe"
-```
-
-VOICEPEAK側では、ナレーター、速度、ピッチ、感情、音声出力先などを設定してください。VOICEPEAKは複数同時に起動せず、ウィンドウを最小化しないで使用します。
-
-### 4. whisper.cpp
-
-Visual Studio Build Toolsでは「C++によるデスクトップ開発」を有効にしてください。
-
-```powershell
-cd C:\
-mkdir voice_ai
-cd C:\voice_ai
-git clone https://github.com/ggml-org/whisper.cpp.git
-cd whisper.cpp
-```
+VOICEPEAKとこの音声チャットを実行中の場合は、先に終了してください。BridgeのDLLがVOICEPEAKへ読み込まれている間は、Windowsのファイルロックにより再ビルドできません。
 
 CPU版:
 
 ```powershell
-cmake -B build -G Ninja
-cmake --build build -j 8
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
 NVIDIA GPU／CUDA版:
 
 ```powershell
-cmake -B build -G Ninja -DGGML_CUDA=ON
-cmake --build build -j 8
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -WhisperBackend cuda
 ```
 
 CUDAアーキテクチャを指定する例:
 
 ```powershell
-cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=61
-cmake --build build -j 8
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
+  -WhisperBackend cuda `
+  -CudaArchitectures "86"
 ```
 
-ビルド後、次のファイルが必要です。
+`setup.ps1`は次を自動実行します。
 
-```text
-C:\voice_ai\whisper.cpp\build\bin\whisper-server.exe
-```
+1. `.venv`を作成
+2. `requirements.txt`からPythonパッケージをインストール
+3. 公式`ggml-org/whisper.cpp`の動作確認済みリビジョンをclone
+4. `whisper-server.exe`をビルド
+5. `ggml-small.bin`をダウンロードしてSHA-1を検証
+6. 公式`rotensyo/VoicepeakProxy` Release v1.2.1から`VoicepeakProxyCore`を取得
+7. C#のVOICEPEAK Bridgeをビルド
+8. Bridgeの実行先へVoicepeakProxyCore一式を配置
+9. `app_config.json`がなければ設定例から作成
 
-### 5. Whisperモデル
-
-whisper.cpp付属のダウンロードスクリプトなどで`small`モデルを取得し、次の場所へ配置します。
-
-```text
-C:\voice_ai\whisper.cpp\models\ggml-small.bin
-```
-
-### 6. VoicepeakProxyCore
-
-VoicepeakProxyのReleaseから`VoicepeakProxyCore.zip`を取得し、展開します。
-
-```text
-C:\voice_ai\VoicepeakProxyCore-1.2.1\
-```
-
-主な必要ファイル:
-
-```text
-VoicepeakProxyCore.dll
-VoicepeakProxyCore.deps\
-EasyHook32.dll
-EasyHook64.dll
-EasyLoad32.dll
-EasyLoad64.dll
-Interop.UIAutomationClient.dll
-NAudio.Core.dll
-NAudio.Wasapi.dll
-```
-
-配置場所を変更する場合は、`VoicepeakProxyTest.csproj`の`HintPath`も合わせて変更します。
-
-### 7. VOICEPEAK Bridge
-
-次の2ファイルを配置します。
-
-```text
-C:\voice_ai\voicepeak_proxy_test\Program.cs
-C:\voice_ai\voicepeak_proxy_test\VoicepeakProxyTest.csproj
-```
-
-Bridgeをビルドします。
+セットアップは再実行できます。既に取得済みのファイルは基本的に再利用します。WhisperモデルとVoicepeakProxyCoreを再取得する場合は`-ForceDownload`を付けます。
 
 ```powershell
-cd C:\voice_ai\voicepeak_proxy_test
-dotnet build -c Release
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -ForceDownload
 ```
 
-生成先:
+### 4. VOICEPEAKの場所を設定
+
+セットアップで作成された`app_config.json`を開きます。
+
+```json
+{
+  "voicepeak_exe": "C:\\Path\\To\\VOICEPEAK\\voicepeak.exe"
+}
+```
+
+`voicepeak_exe`だけ、実際にインストールされている`voicepeak.exe`の絶対パスへ変更してください。
+
+例:
+
+```json
+{
+  "voicepeak_exe": "D:\\Apps\\VOICEPEAK\\voicepeak.exe"
+}
+```
+
+個人環境のパスを含む`app_config.json`は`.gitignore`対象です。配布用の初期値は`app_config.example.json`にあります。
+
+### 5. 起動
+
+`start.bat`をダブルクリックするか、ターミナルから実行します。
+
+```cmd
+start.bat
+```
+
+終了するときはコンソールで`Ctrl+C`を押します。
+
+## パスの扱い
+
+VOICEPEAK本体を除くすべてのファイルは、cloneしたリポジトリを基準に自動解決します。フォルダーごと別の場所へ移動しても、Pythonファイルのパスを書き換える必要はありません。
+
+主な配置先:
 
 ```text
-C:\voice_ai\voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyTest.exe
+VoiceChatAIwithVoicepeak\
+├─ voice_chat_gemini.py
+├─ app_config.json                 # 利用者が設定、Git管理外
+├─ gemini_config.json
+├─ system_instruction.txt
+├─ requirements.txt
+├─ setup.ps1
+├─ start.bat
+├─ .venv\                          # setup.ps1が作成、Git管理外
+├─ whisper.cpp\                    # setup.ps1が取得、Git管理外
+│  ├─ build-voice-chat\
+│  └─ models\ggml-small.bin
+├─ external\VoicepeakProxyCore\    # setup.ps1が取得、Git管理外
+└─ voicepeak_proxy_test\
+   └─ bin\Release\net48\          # setup.ps1がビルド、Git管理外
 ```
-
-VoicepeakProxyCore一式を出力先へコピーします。
-
-```powershell
-Copy-Item `
-  "C:\voice_ai\VoicepeakProxyCore-1.2.1\*" `
-  "C:\voice_ai\voicepeak_proxy_test\bin\Release\net48\" `
-  -Recurse -Force
-```
-
-必要に応じてDLLのブロックを解除します。
-
-```powershell
-Get-ChildItem `
-  "C:\voice_ai\voicepeak_proxy_test\bin\Release\net48" `
-  -Recurse |
-  Unblock-File
-```
-
-### 8. ファイル配置とパス
-
-次の3ファイルを配置します。
-
-```text
-C:\voice_ai\voice_chat_gemini.py
-C:\voice_ai\gemini_config.json
-C:\voice_ai\system_instruction.txt
-```
-
-標準パス:
-
-```text
-Whisper Server:
-C:\voice_ai\whisper.cpp\build\bin\whisper-server.exe
-
-Whisper model:
-C:\voice_ai\whisper.cpp\models\ggml-small.bin
-
-VOICEPEAK Bridge:
-C:\voice_ai\voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyTest.exe
-```
-
-異なる場所を使う場合は、Pythonファイル冒頭の設定を変更してください。
-
-```python
-VOICEPEAK_EXE = r"..."
-VOICEPEAK_BRIDGE = r"..."
-WHISPER_SERVER_EXE = r"..."
-WHISPER_MODEL = r"..."
-INPUT_WAV = r"..."
-CONVERSATION_LOG = r"..."
-GEMINI_CONFIG_FILE = r"..."
-SYSTEM_INSTRUCTION_FILE = r"..."
-```
-
-## 起動
-
-PowerShellで次を実行します。
-
-```powershell
-cd C:\voice_ai
-python .\voice_chat_gemini.py
-```
-
-起動時に次の処理が自動実行されます。
-
-- Gemini設定とシステム指示の読み込み
-- 過去の会話履歴の読み込み
-- Whisper Serverの起動または既存Serverへの接続
-- VOICEPEAK本体の起動確認
-- VOICEPEAK Bridgeの起動
-- マイク入力の開始
-- 0.5秒間の環境ノイズ測定
-
-表示例:
-
-```text
-================================
- Gemini Voice Chat
-================================
-
-Whisper Server準備完了
-VOICEPEAK確認OK
-VOICEPEAK Bridge準備完了
-
-常時リスニングを開始します。
-最初の0.50秒間は環境ノイズを測定します。
-Ctrl+Cで終了。
-
-ノイズレベル: 42.0 / 発話閾値: 150.0
-発話待機中...
-```
-
-起動直後の0.5秒間は声を出さないでください。声が環境ノイズとして測定されると、発話を検出しにくくなることがあります。
 
 ## 会話方法
 
-SpaceやF8は使用しません。`発話待機中...`と表示されたら、そのままマイクへ話します。
+起動後、最初の0.5秒間は環境ノイズを測定します。この間は声を出さないでください。
 
 ```text
-話し始める
+発話待機中...
     ↓
 100ms連続で声を検出
     ↓
@@ -255,152 +170,24 @@ SpaceやF8は使用しません。`発話待機中...`と表示されたら、�
     ↓
 ■ 発話終了
     ↓
-Whisperで文字起こし
-    ↓
-Geminiが返答
-    ↓
-VOICEPEAKが読み上げ
+Whisper → Gemini → VOICEPEAK
 ```
 
-発話開始前0.3秒も録音へ含まれるため、語頭が切れにくくなっています。
+発話開始前0.3秒も録音へ含まれます。1回の発話は最大20秒で、0.35秒未満の短い入力は誤検出として破棄されます。
 
-1回の発話は最大20秒です。0.35秒未満の短い入力は、誤検出として破棄されます。
+Whisper、Gemini、VOICEPEAKの処理中もマイクは有効です。続けて話した音声はキューへ追加され、録音された順番に処理されます。
 
-## 処理中に続けて話す場合
+## 設定ファイル
 
-マイクは次の処理中も有効です。
+### app_config.json
 
-- Whisperによる文字起こし
-- Geminiの返答生成
-- VOICEPEAKへの送信
-- VOICEPEAKの読み上げ
+利用者の環境に依存する設定です。
 
-処理中に話した音声はキューへ追加され、先に録音された発話から順番に処理されます。
+| 設定 | 内容 |
+| --- | --- |
+| `voicepeak_exe` | `voicepeak.exe`の絶対パス |
 
-```text
-■ 発話終了
-音声処理キューへ追加 (待機数: 1)
-発話待機中...
-```
-
-## 終了
-
-`Ctrl+C`を押します。
-
-Python自身が起動したWhisper ServerとVOICEPEAK Bridgeも終了します。実行前から起動していたWhisper Serverは終了しません。
-
-## 保存されるファイル
-
-### input.wav
-
-直近の発話を次の形式で保存します。
-
-- PCM16
-- 16 kHz
-- mono
-
-```text
-C:\voice_ai\input.wav
-```
-
-発話終了判定には0.55秒の無音を使いますが、WAVへ残す末尾無音は0.15秒です。
-
-`input.wav`は発話ごとに上書きされます。過去の音声は保存されません。
-
-### conversation_history.jsonl
-
-認識されたユーザー発話とGeminiの返答を、日時付きで追記します。
-
-```text
-C:\voice_ai\conversation_history.jsonl
-```
-
-記録例:
-
-```json
-{"timestamp": "2026-08-24T10:30:12+09:00", "role": "user", "text": "今何時？"}
-{"timestamp": "2026-08-24T10:30:13+09:00", "role": "assistant", "text": "今は10時30分くらいだよ。"}
-```
-
-起動時にこのファイルから、ユーザー発話とアシスタント返答が揃った会話を読み込みます。本文のないGemini応答などでユーザー行だけが残った記録は、履歴の構造を壊さないよう読み飛ばします。
-
-読み込む件数は`gemini_config.json`の`history_max_turns`で指定します。初期値は直近30往復です。`0`にすると過去ログを読み込みません。
-
-### whisper_server.log
-
-Whisper Serverのログです。
-
-```text
-C:\voice_ai\whisper_server.log
-```
-
-## 現在日時
-
-Geminiにはユーザー発話と一緒に、PCの現在日時とタイムゾーンを渡しています。
-
-そのため、次のような質問ができます。
-
-```text
-今何時？
-今日は何日？
-今日の予定を考えたい
-```
-
-日時はPCの時計を基準にします。
-
-## ノイズの扱い
-
-録音開始には、動的に計算した発話閾値を100ms連続で超える必要があります。短いキーボード音などでは開始しにくい設定です。
-
-Whisperが次のような効果音表記を返した場合は、Geminiへ送りません。
-
-```text
-(音楽)
-（パッ）
-[拍手]
-【雑音】
-```
-
-本文と効果音が混ざった場合は、効果音部分だけを削除します。
-
-```text
-認識結果: （音楽）こんにちは
-Geminiへ送る内容: こんにちは
-```
-
-無音時に誤認識されやすい次の文も無視します。
-
-```text
-ご視聴ありがとうございました
-ご清聴ありがとうございました
-チャンネル登録お願いします
-```
-
-## VOICEPEAK読み上げ中の注意
-
-マイクはVOICEPEAKの読み上げ中も有効です。
-
-スピーカーの音をマイクが拾うと、VOICEPEAK自身の声をユーザー発話として認識し、自己応答を繰り返す可能性があります。
-
-次のいずれかを推奨します。
-
-- ヘッドホンまたはイヤホンを使う
-- Windowsや音声デバイスのエコー抑制を有効にする
-- マイクをスピーカーから離す
-
-Bridgeは`QUEUED|job_id`を受け取った時点で送信完了とします。VOICEPEAKの実際の再生終了は待ちません。
-
-## 主な設定
-
-### Gemini設定
-
-モデルや履歴の読込件数は、次のファイルで設定します。
-
-```text
-C:\voice_ai\gemini_config.json
-```
-
-初期設定:
+### gemini_config.json
 
 ```json
 {
@@ -416,19 +203,13 @@ C:\voice_ai\gemini_config.json
 | `model` | 使用するGeminiモデル |
 | `max_output_tokens` | Gemini応答の最大トークン数 |
 | `thinking_level` | Geminiの思考レベル |
-| `history_max_turns` | 起動時に読み込む会話の往復数 |
+| `history_max_turns` | 起動時に読み込む会話の往復数。`0`で無効 |
 
-必要な場合は`temperature`もJSONへ追加できます。省略時はモデルのデフォルト値を使用します。
+必要なら`temperature`も追加できます。省略時はモデルのデフォルト値を使用します。
 
-### システム指示
+### system_instruction.txt
 
-人格、話し方、返答ルールは次のテキストファイルへ記述します。
-
-```text
-C:\voice_ai\system_instruction.txt
-```
-
-変更内容は次回起動時から反映されます。Pythonファイルへ長いプロンプトを直接記述する必要はありません。
+Geminiの人格、話し方、返答ルールを記述します。変更は次回起動時から反映されます。
 
 ### 録音設定
 
@@ -447,61 +228,79 @@ C:\voice_ai\system_instruction.txt
 | `NOISE_THRESHOLD_MULTIPLIER` | `2.5` | 環境ノイズへ掛ける倍率 |
 | `CAPTURE_QUEUE_SECONDS` | `5.0` | 入力取りこぼし対策のバッファ |
 
-発話を検出しない場合は`MIN_SPEECH_RMS`または`NOISE_THRESHOLD_MULTIPLIER`を少し下げます。雑音を拾いすぎる場合は上げます。
+## 保存されるファイル
+
+すべてリポジトリ直下へ保存され、GitHubにはアップロードされません。
+
+- `input.wav`: 直近の発話。PCM16／16 kHz／mono
+- `conversation_history.jsonl`: ユーザー発話とGemini返答の会話履歴
+- `whisper_server.log`: Whisper Serverのログ
+
+会話履歴からは、ユーザー発話とアシスタント返答が揃った直近の会話だけを起動時に読み込みます。
+
+## ノイズの扱い
+
+Whisperが次のような効果音表記だけを返した場合はGeminiへ送りません。
+
+```text
+(音楽)
+（パッ）
+[拍手]
+【雑音】
+```
+
+本文と効果音が混ざった場合は効果音部分だけを削除します。「ご視聴ありがとうございました」など、無音時に出やすい代表的な誤認識も無視します。
+
+## VOICEPEAK読み上げ中の注意
+
+マイクはVOICEPEAKの読み上げ中も有効です。スピーカーの音をマイクが拾うと自己応答を繰り返す可能性があります。
+
+- ヘッドホンまたはイヤホンを使う
+- Windowsや音声デバイスのエコー抑制を有効にする
+- マイクをスピーカーから離す
+
+VOICEPEAKは1プロセスだけ起動し、ウィンドウを最小化しないで使用してください。
 
 ## トラブルシューティング
 
+### setup.ps1で前提ツールが見つからない
+
+エラーに表示されたツールをインストールし、新しいPowerShellを開いて再実行してください。Visual Studio Build Toolsでは「C++によるデスクトップ開発」を有効にします。
+
+### whisper-server.exeのビルドに失敗する
+
+- CPU版では`setup.ps1`を引数なしで再実行
+- CUDA版ではCUDA Toolkitと対応GPUを確認
+- Visual Studio Build Tools 2022のC++ワークロードを確認
+- 古い途中生成物と分けるため、自動セットアップは`build-voice-chat`を使用します
+
+### VOICEPEAKが見つからない
+
+`app_config.json`のJSON構文と`voicepeak_exe`を確認します。Windowsのパス区切りはJSON内で`\\`と書きます。
+
 ### マイク入力の取りこぼし
 
-次の表示が出ても、入力監視は自動的に継続します。
+「マイク入力の取りこぼしを検出しました」と表示されても監視は継続します。頻発する場合はCPU負荷、入力デバイス、マイク拡張機能を確認し、必要なら`CAPTURE_QUEUE_SECONDS`を増やします。
 
-```text
-マイク入力の取りこぼしを検出しました。
-入力監視は自動的に継続します。
-```
+### 発話を検出しない／雑音を拾いすぎる
 
-頻繁に発生する場合:
-
-- CPU負荷の高いアプリを終了する
-- 仮想オーディオデバイスやマイク拡張機能を見直す
-- `CAPTURE_QUEUE_SECONDS`を増やす
-- `INPUT_LATENCY = "high"`になっているか確認する
-- マイクが16 kHz入力へ対応しているか確認する
-
-### 発話を検出しない
-
-- 起動直後の0.5秒間に話していないか確認する
-- Windowsの入力デバイスとマイク音量を確認する
-- `MIN_SPEECH_RMS`を少し下げる
-- `NOISE_THRESHOLD_MULTIPLIER`を少し下げる
-
-### 雑音を発話として検出する
-
-- `MIN_SPEECH_RMS`を少し上げる
-- `NOISE_THRESHOLD_MULTIPLIER`を少し上げる
-- `SPEECH_START_SECONDS`を少し長くする
+- 検出しない場合: `MIN_SPEECH_RMS`または`NOISE_THRESHOLD_MULTIPLIER`を下げる
+- 雑音を拾う場合: これらを上げるか`SPEECH_START_SECONDS`を長くする
 
 ### Geminiから本文が返らない
 
-```text
-Geminiから本文のないレスポンスが返されました。
-finish_reason: FinishReason.STOP
-```
-
-`STOP`は正常終了を表しますが、テキスト部分のない応答が返る場合があります。一度だけなら同じ内容をもう一度話してください。
-
-頻発する場合は、Gemini設定の`max_output_tokens`を512以上へ増やす、`temperature`指定を外す、thinking levelを`minimal`にする、といった調整候補があります。
-
-### 音声を認識しなくなった
-
-- マイクがほかのアプリに占有されていないか確認する
-- Windowsの既定の入力デバイスを確認する
-- プログラムをCtrl+Cで終了して再起動する
-- `whisper_server.log`を確認する
+一度だけなら同じ内容を話し直してください。頻発する場合は`max_output_tokens`を増やす、`temperature`を外す、`thinking_level`を`minimal`にする方法があります。
 
 ### VOICEPEAKが読み上げない
 
-- VOICEPEAKが1プロセスだけ起動しているか確認する
-- VOICEPEAKを最小化していないか確認する
-- BridgeとVoicepeakProxyCoreのDLL一式を確認する
-- Bridgeを再ビルドする場合は、実行中のBridgeを先に終了する
+- VOICEPEAKが1プロセスだけ起動しているか確認
+- VOICEPEAKを最小化していないか確認
+- `app_config.json`のパスを確認
+- `setup.ps1`を再実行してBridgeを再ビルド
+
+## 外部プロジェクト
+
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+- [VoicepeakProxy](https://github.com/rotensyo/VoicepeakProxy)
+
+各プロジェクトとVOICEPEAKの利用条件を確認して使用してください。

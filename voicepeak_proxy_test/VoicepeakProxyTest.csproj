@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <Reference Include="VoicepeakProxyCore">
-      <HintPath>C:\voice_ai\VoicepeakProxyCore-1.2.1\VoicepeakProxyCore.dll</HintPath>
+      <HintPath>..\external\VoicepeakProxyCore\VoicepeakProxyCore.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
