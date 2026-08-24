@@ -54,6 +54,17 @@ VOICEPEAK_BRIDGE = repository_path(
     "VoicepeakProxyTest.exe",
 )
 
+# VOICEPEAKのプロセス起動後、操作対象ウィンドウと内部初期化を待つ。
+VOICEPEAK_WINDOW_TIMEOUT = 30.0
+VOICEPEAK_GUI_SETTLE_SECONDS = 5.0
+
+# VOICEPEAKの内部初期化が遅い場合にBridge起動を再試行する。
+VOICEPEAK_BRIDGE_START_RETRY_SECONDS = (
+    3.0,
+    5.0,
+    8.0,
+)
+
 
 # ------------------------------------------------------------
 # Whisper Server
@@ -482,14 +493,28 @@ class WhisperServer:
 # VOICEPEAK起動確認
 # ============================================================
 
-def get_voicepeak_paths():
+def get_voicepeak_paths(
+    require_main_window=False
+):
 
     # 日本語パスが文字化けしないよう、
     # PowerShell側でUTF-8を明示する。
+    window_filter = (
+        r"""
+    Where-Object {
+        $_.MainWindowHandle -ne 0 -and
+        $_.MainWindowTitle -match '^VOICEPEAK(?:\s|$)'
+    } |
+"""
+        if require_main_window
+        else ""
+    )
+
     ps_script = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 Get-Process voicepeak -ErrorAction SilentlyContinue |
+""" + window_filter + r"""
     ForEach-Object { $_.Path }
 """
 
@@ -521,6 +546,59 @@ Get-Process voicepeak -ErrorAction SilentlyContinue |
     ]
 
 
+def normalize_paths(paths):
+
+    return [
+        os.path.normcase(
+            os.path.abspath(path)
+        )
+        for path in paths
+    ]
+
+
+def wait_for_voicepeak_window(
+    correct_path,
+    timeout=VOICEPEAK_WINDOW_TIMEOUT,
+):
+
+    deadline = time.perf_counter() + timeout
+
+    while time.perf_counter() < deadline:
+
+        process_paths = get_voicepeak_paths()
+        correct_process_count = normalize_paths(
+            process_paths
+        ).count(correct_path)
+
+        if correct_process_count > 1:
+            raise RuntimeError(
+                "VOICEPEAKが複数起動しています。"
+                "すべて終了してから、もう一度"
+                "起動してください。"
+            )
+
+        window_paths = get_voicepeak_paths(
+            require_main_window=True
+        )
+
+        if correct_path in normalize_paths(
+            window_paths
+        ):
+
+            print("VOICEPEAKウィンドウ確認OK")
+
+            # MainWindowHandle生成後の内部UI初期化を待つ。
+            time.sleep(
+                VOICEPEAK_GUI_SETTLE_SECONDS
+            )
+
+            return True
+
+        time.sleep(0.5)
+
+    return False
+
+
 def ensure_voicepeak_running(
     auto_start=True
 ):
@@ -535,21 +613,24 @@ def ensure_voicepeak_running(
     )
 
 
-    normalized_paths = [
-
-        os.path.normcase(
-            os.path.abspath(path)
-        )
-
-        for path in paths
-    ]
+    normalized_paths = normalize_paths(paths)
 
 
     # app_config.jsonで指定したVOICEPEAKが起動中
     if correct_path in normalized_paths:
 
         print()
-        print("VOICEPEAK確認OK")
+        print("VOICEPEAKプロセス確認OK")
+
+        if not wait_for_voicepeak_window(
+            correct_path
+        ):
+            raise RuntimeError(
+                "VOICEPEAKのウィンドウ準備が"
+                "タイムアウトしました。"
+            )
+
+        print("VOICEPEAK準備完了")
 
         return True
 
@@ -592,41 +673,13 @@ def ensure_voicepeak_running(
     )
 
 
-    # 最大15秒待つ
-    deadline = (
-        time.perf_counter()
-        + 15
-    )
+    if wait_for_voicepeak_window(correct_path):
 
+        print(
+            "VOICEPEAK起動完了"
+        )
 
-    while time.perf_counter() < deadline:
-
-        time.sleep(0.5)
-
-
-        paths = get_voicepeak_paths()
-
-
-        normalized_paths = [
-
-            os.path.normcase(
-                os.path.abspath(path)
-            )
-
-            for path in paths
-        ]
-
-
-        if correct_path in normalized_paths:
-
-            # GUIの初期化を待つ
-            time.sleep(3)
-
-            print(
-                "VOICEPEAK起動完了"
-            )
-
-            return True
+        return True
 
 
     raise RuntimeError(
@@ -1520,6 +1573,52 @@ class VoicepeakBridge:
 
     def start(self):
 
+        last_error = None
+        retry_delays = (
+            0.0,
+            *VOICEPEAK_BRIDGE_START_RETRY_SECONDS,
+        )
+
+        for attempt, wait_seconds in enumerate(
+            retry_delays,
+            start=1,
+        ):
+
+            if wait_seconds > 0:
+
+                print()
+                print(
+                    "VOICEPEAK Bridgeの起動を"
+                    "再試行します "
+                    f"({attempt}/{len(retry_delays)})"
+                )
+
+                time.sleep(wait_seconds)
+
+            try:
+                self._start_once()
+                return
+
+            except RuntimeError as e:
+                last_error = e
+                self._force_stop()
+
+                if attempt >= len(retry_delays):
+                    break
+
+                print(
+                    "VOICEPEAK Bridge起動待機: "
+                    f"{e}"
+                )
+
+        raise RuntimeError(
+            "VOICEPEAK Bridgeを起動できませんでした。"
+            f"最後のエラー: {last_error}"
+        ) from last_error
+
+
+    def _start_once(self):
+
         print()
         print("VOICEPEAK Bridgeを起動中...")
 
@@ -1559,7 +1658,13 @@ class VoicepeakBridge:
 
             if line == "":
 
-                return_code = self.process.poll()
+                try:
+                    return_code = self.process.wait(
+                        timeout=1
+                    )
+
+                except subprocess.TimeoutExpired:
+                    return_code = self.process.poll()
 
                 self._force_stop()
 
