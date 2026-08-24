@@ -22,7 +22,7 @@ $AppConfig = Join-Path $RepositoryRoot "app_config.json"
 $AppConfigExample = Join-Path $RepositoryRoot "app_config.example.json"
 $WhisperDirectory = Join-Path $RepositoryRoot "whisper.cpp"
 $WhisperBuildDirectory = Join-Path $WhisperDirectory "build-voice-chat"
-$WhisperServer = Join-Path $WhisperBuildDirectory "bin\Release\whisper-server.exe"
+$WhisperBackendMarker = Join-Path $WhisperBuildDirectory ".voice-chat-backend"
 $WhisperModel = Join-Path $WhisperDirectory "models\ggml-small.bin"
 $VoicepeakCoreDirectory = Join-Path $RepositoryRoot "external\VoicepeakProxyCore"
 $VoicepeakCoreDll = Join-Path $VoicepeakCoreDirectory "VoicepeakProxyCore.dll"
@@ -88,6 +88,79 @@ function Get-PythonCommand {
     }
 
     throw "Pythonが見つかりません。Python 3.12以降をインストールしてください。"
+}
+
+
+function Initialize-VisualStudioBuildEnvironment {
+    $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+
+    if (-not (Test-Path -LiteralPath $VsWhere)) {
+        throw "vswhere.exeが見つかりません。Visual Studio 2022 Build ToolsのC++ビルドツールをインストールしてください。"
+    }
+
+    $VisualStudioPath = (& $VsWhere `
+        -latest `
+        -products "*" `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -property installationPath).Trim()
+
+    if (-not $VisualStudioPath) {
+        throw "Visual Studio 2022のC++ビルドツールが見つかりません。"
+    }
+
+    $VsDevCmd = Join-Path $VisualStudioPath "Common7\Tools\VsDevCmd.bat"
+
+    if (-not (Test-Path -LiteralPath $VsDevCmd)) {
+        throw "VsDevCmd.batが見つかりません: $VsDevCmd"
+    }
+
+    $CommandLine = "`"$VsDevCmd`" -no_logo -arch=x64 -host_arch=x64 >nul && set"
+    $EnvironmentLines = & $env:ComSpec /d /s /c $CommandLine
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Visual Studioのビルド環境を初期化できませんでした。"
+    }
+
+    foreach ($Line in $EnvironmentLines) {
+        $Separator = $Line.IndexOf("=")
+
+        if ($Separator -le 0) {
+            continue
+        }
+
+        $Name = $Line.Substring(0, $Separator)
+        $Value = $Line.Substring($Separator + 1)
+        Set-Item -LiteralPath "Env:$Name" -Value $Value
+    }
+
+    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+        throw "Visual Studio環境の初期化後もcl.exeが見つかりません。"
+    }
+
+    Write-Host "Visual Studio C++ビルド環境を初期化しました。"
+}
+
+
+function Reset-WhisperBuildDirectory {
+    if (-not (Test-Path -LiteralPath $WhisperBuildDirectory)) {
+        return
+    }
+
+    $WhisperRoot = [System.IO.Path]::GetFullPath($WhisperDirectory).TrimEnd("\") + "\"
+    $BuildRoot = [System.IO.Path]::GetFullPath($WhisperBuildDirectory)
+
+    if (
+        -not $BuildRoot.StartsWith(
+            $WhisperRoot,
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [System.IO.Path]::GetFileName($BuildRoot) -ne "build-voice-chat"
+    ) {
+        throw "Whisperビルド先が想定範囲外です: $BuildRoot"
+    }
+
+    Write-Host "ビルド方式を切り替えるため、既存の生成物を再作成します。"
+    Remove-Item -LiteralPath $BuildRoot -Recurse -Force
 }
 
 
@@ -168,23 +241,61 @@ else {
     Write-Host "既存のwhisper.cppを使用します。"
 }
 
+if ($WhisperBackend -eq "cuda") {
+    Require-Command "nvcc" "CUDA Toolkitをインストールしてください。"
+    Require-Command "ninja" "Ninja Buildをインストールしてください。"
+    Initialize-VisualStudioBuildEnvironment
+}
+
+$WhisperGenerator = if ($WhisperBackend -eq "cuda") {
+    "Ninja"
+}
+else {
+    "Visual Studio 17 2022"
+}
+
+$ExistingGenerator = ""
+$CMakeCache = Join-Path $WhisperBuildDirectory "CMakeCache.txt"
+
+if (Test-Path -LiteralPath $CMakeCache) {
+    $GeneratorLine = Get-Content -LiteralPath $CMakeCache |
+        Where-Object { $_ -like "CMAKE_GENERATOR:INTERNAL=*" } |
+        Select-Object -First 1
+
+    if ($GeneratorLine) {
+        $ExistingGenerator = $GeneratorLine.Substring(
+            "CMAKE_GENERATOR:INTERNAL=".Length
+        )
+    }
+}
+
+if ($ExistingGenerator -and $ExistingGenerator -ne $WhisperGenerator) {
+    Reset-WhisperBuildDirectory
+}
+
+if (Test-Path -LiteralPath $WhisperBackendMarker) {
+    Remove-Item -LiteralPath $WhisperBackendMarker -Force
+}
+
 $CMakeArguments = @(
     "-S", $WhisperDirectory,
     "-B", $WhisperBuildDirectory,
-    "-G", "Visual Studio 17 2022",
-    "-A", "x64",
+    "-G", $WhisperGenerator,
     "-DWHISPER_BUILD_EXAMPLES=ON",
     "-DWHISPER_BUILD_SERVER=ON"
 )
 
 if ($WhisperBackend -eq "cuda") {
+    $CMakeArguments += "-DCMAKE_BUILD_TYPE=Release"
     $CMakeArguments += "-DGGML_CUDA=ON"
+    $CMakeArguments += "-DCMAKE_CUDA_FLAGS=--diag-suppress=221 -Xcompiler=/utf-8"
 
     if ($CudaArchitectures) {
         $CMakeArguments += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures"
     }
 }
 else {
+    $CMakeArguments += @("-A", "x64")
     $CMakeArguments += "-DGGML_CUDA=OFF"
 }
 
@@ -196,9 +307,24 @@ Invoke-Checked "cmake" @(
     "-j", $BuildJobs.ToString()
 )
 
+$WhisperBinDirectory = if ($WhisperBackend -eq "cuda") {
+    Join-Path $WhisperBuildDirectory "bin"
+}
+else {
+    Join-Path $WhisperBuildDirectory "bin\Release"
+}
+$WhisperServer = Join-Path $WhisperBinDirectory "whisper-server.exe"
+$WhisperCudaDll = Join-Path $WhisperBinDirectory "ggml-cuda.dll"
+
 if (-not (Test-Path -LiteralPath $WhisperServer)) {
     throw "whisper-server.exeが生成されませんでした: $WhisperServer"
 }
+
+if ($WhisperBackend -eq "cuda" -and -not (Test-Path -LiteralPath $WhisperCudaDll)) {
+    throw "CUDA版のggml-cuda.dllが生成されませんでした: $WhisperCudaDll"
+}
+
+Set-Content -LiteralPath $WhisperBackendMarker -Value $WhisperBackend -Encoding ASCII
 
 Write-Step "Whisper smallモデルを準備"
 $DownloadModel = $ForceDownload -or -not (Test-Path -LiteralPath $WhisperModel)

@@ -28,7 +28,7 @@
 - .NET Framework 4.8 Developer Pack
 - VOICEPEAK本体
 - Gemini APIキー
-- NVIDIA GPU版を使う場合のみCUDA Toolkit
+- NVIDIA GPU版を使う場合のみCUDA ToolkitとNinja Build
 
 VOICEPEAK、Gemini APIキー、OS向け開発ツールは利用者が用意してください。それ以外のPythonパッケージ、whisper.cpp、Whisperモデル、VoicepeakProxyCore、VOICEPEAK Bridgeは`setup.ps1`が準備します。
 
@@ -97,6 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
 
 セットアップは再実行できます。既に取得済みのファイルは基本的に再利用します。WhisperモデルとVoicepeakProxyCoreを再取得する場合は`-ForceDownload`を付けます。
 
+CUDA版の初回ビルドでは多数のCUDAカーネルを生成するため、PCによっては数分以上かかります。2回目以降は構成が変わらない限り再ビルドしません。
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -ForceDownload
 ```
@@ -145,6 +147,8 @@ start.bat --cuda
 ```cmd
 start.bat --check
 ```
+
+`--check`は設定値だけでなく、ビルド完了マーカー、使用したCMakeジェネレーター、CUDA版の`ggml-cuda.dll`まで確認します。途中でCUDAビルドが失敗した場合は、次回起動時に古いCPU版を使わずセットアップを再実行します。
 
 終了するときはコンソールで`Ctrl+C`を押します。
 
@@ -289,7 +293,7 @@ PythonからVOICEPEAKを自動起動した場合は、プロセス検出だけ�
 ### whisper-server.exeのビルドに失敗する
 
 - CPU版では`setup.ps1`を引数なしで再実行
-- CUDA版ではCUDA Toolkitと対応GPUを確認
+- CUDA版ではCUDA Toolkit、Ninja Build、対応GPUを確認
 - Visual Studio Build Tools 2022のC++ワークロードを確認
 - 古い途中生成物と分けるため、自動セットアップは`build-voice-chat`を使用します
 

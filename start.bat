@@ -17,6 +17,7 @@ goto parse_arguments
 :arguments_done
 set "WHISPER_BACKEND=cpu"
 set "CUDA_ARCH="
+set "WHISPER_BIN=whisper.cpp\build-voice-chat\bin\Release"
 
 if /i "%FORCED_BACKEND%"=="cpu" goto backend_ready
 if /i "%FORCED_BACKEND%"=="cuda" goto enable_cuda
@@ -29,6 +30,7 @@ if errorlevel 1 goto backend_ready
 
 :enable_cuda
 set "WHISPER_BACKEND=cuda"
+set "WHISPER_BIN=whisper.cpp\build-voice-chat\bin"
 
 for /f "tokens=1 delims=," %%G in ('nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul') do (
     if not defined CUDA_ARCH set "CUDA_ARCH=%%G"
@@ -41,17 +43,27 @@ set "CUDA_ARCH=%CUDA_ARCH: =%"
 set "SETUP_REQUIRED=0"
 
 if not exist ".venv\Scripts\python.exe" set "SETUP_REQUIRED=1"
-if not exist "whisper.cpp\build-voice-chat\bin\Release\whisper-server.exe" set "SETUP_REQUIRED=1"
+if not exist "%WHISPER_BIN%\whisper-server.exe" set "SETUP_REQUIRED=1"
 if not exist "whisper.cpp\models\ggml-small.bin" set "SETUP_REQUIRED=1"
 if not exist "external\VoicepeakProxyCore\VoicepeakProxyCore.dll" set "SETUP_REQUIRED=1"
 if not exist "voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyTest.exe" set "SETUP_REQUIRED=1"
 if not exist "whisper.cpp\build-voice-chat\CMakeCache.txt" set "SETUP_REQUIRED=1"
+if not exist "whisper.cpp\build-voice-chat\.voice-chat-backend" set "SETUP_REQUIRED=1"
 
 if /i "%WHISPER_BACKEND%"=="cuda" (
     findstr.exe /x /c:"GGML_CUDA:BOOL=ON" "whisper.cpp\build-voice-chat\CMakeCache.txt" > nul 2>&1
     if errorlevel 1 set "SETUP_REQUIRED=1"
+    findstr.exe /x /c:"cuda" "whisper.cpp\build-voice-chat\.voice-chat-backend" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+    findstr.exe /x /c:"CMAKE_GENERATOR:INTERNAL=Ninja" "whisper.cpp\build-voice-chat\CMakeCache.txt" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+    if not exist "%WHISPER_BIN%\ggml-cuda.dll" set "SETUP_REQUIRED=1"
 ) else (
     findstr.exe /x /c:"GGML_CUDA:BOOL=OFF" "whisper.cpp\build-voice-chat\CMakeCache.txt" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+    findstr.exe /x /c:"cpu" "whisper.cpp\build-voice-chat\.voice-chat-backend" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+    findstr.exe /x /c:"CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022" "whisper.cpp\build-voice-chat\CMakeCache.txt" > nul 2>&1
     if errorlevel 1 set "SETUP_REQUIRED=1"
 )
 
