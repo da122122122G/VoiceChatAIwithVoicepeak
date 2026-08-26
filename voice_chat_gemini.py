@@ -769,10 +769,11 @@ client = None
 chat = None
 
 DEFAULT_GEMINI_SETTINGS = {
-    "model": "gemini-3.5-flash-lite",
+    "model": "gemini-3.1-flash-lite",
     "max_output_tokens": 512,
     "thinking_level": "minimal",
     "history_max_turns": 30,
+    "request_timeout_seconds": 15.0,
 }
 
 
@@ -950,6 +951,10 @@ def initialize_gemini_chat():
         0,
         int(settings["history_max_turns"]),
     )
+    request_timeout_seconds = max(
+        1.0,
+        float(settings["request_timeout_seconds"]),
+    )
 
     config_kwargs = {
         "system_instruction": system_instruction,
@@ -989,8 +994,21 @@ def initialize_gemini_chat():
         "システム指示: "
         f"{SYSTEM_INSTRUCTION_FILE}"
     )
+    print(
+        "Geminiタイムアウト: "
+        f"{request_timeout_seconds:.1f} 秒"
+    )
 
-    client = genai.Client()
+    client = genai.Client(
+        http_options=types.HttpOptions(
+            timeout=round(
+                request_timeout_seconds * 1000
+            ),
+            retry_options=types.HttpRetryOptions(
+                attempts=1
+            ),
+        )
+    )
 
     return client.chats.create(
         model=model,

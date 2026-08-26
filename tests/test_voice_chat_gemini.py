@@ -123,5 +123,54 @@ class ConversationHistoryTests(unittest.TestCase):
         self.assertEqual(history[-1].parts[0].text, "回答4")
 
 
+class GeminiClientTests(unittest.TestCase):
+    def test_client_uses_configured_timeout_without_retries(self):
+        settings = app.DEFAULT_GEMINI_SETTINGS | {
+            "request_timeout_seconds": 12.5,
+        }
+        fake_chats = SimpleNamespace(
+            create=lambda **kwargs: kwargs
+        )
+        fake_client = SimpleNamespace(chats=fake_chats)
+
+        with (
+            patch.object(
+                app,
+                "load_gemini_settings",
+                return_value=settings,
+            ),
+            patch.object(
+                app,
+                "load_system_instruction",
+                return_value="テスト指示",
+            ),
+            patch.object(
+                app,
+                "load_conversation_history",
+                return_value=[],
+            ),
+            patch.object(
+                app.genai,
+                "Client",
+                return_value=fake_client,
+            ) as client_factory,
+        ):
+            chat_config = app.initialize_gemini_chat()
+
+        http_options = client_factory.call_args.kwargs[
+            "http_options"
+        ]
+
+        self.assertEqual(http_options.timeout, 12500)
+        self.assertEqual(
+            http_options.retry_options.attempts,
+            1,
+        )
+        self.assertEqual(
+            chat_config["model"],
+            "gemini-3.1-flash-lite",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -215,10 +215,11 @@ Whisper、Gemini、VOICEPEAKの処理中もマイクは有効です。続けて�
 
 ```json
 {
-  "model": "gemini-3.5-flash-lite",
+  "model": "gemini-3.1-flash-lite",
   "max_output_tokens": 512,
   "thinking_level": "minimal",
-  "history_max_turns": 30
+  "history_max_turns": 30,
+  "request_timeout_seconds": 15.0
 }
 ```
 
@@ -228,6 +229,7 @@ Whisper、Gemini、VOICEPEAKの処理中もマイクは有効です。続けて�
 | `max_output_tokens` | Gemini応答の最大トークン数 |
 | `thinking_level` | Geminiの思考レベル |
 | `history_max_turns` | 起動時に読み込む会話の往復数。`0`で無効 |
+| `request_timeout_seconds` | Gemini APIを待つ最大秒数 |
 
 必要なら`temperature`も追加できます。省略時はモデルのデフォルト値を使用します。
 
@@ -316,6 +318,10 @@ PythonからVOICEPEAKを自動起動した場合は、プロセス検出だけ�
 ### Geminiから本文が返らない
 
 一度だけなら同じ内容を話し直してください。頻発する場合は`max_output_tokens`を増やす、`temperature`を外す、`thinking_level`を`minimal`にする方法があります。
+
+### Geminiの応答が遅い
+
+既定では、応答速度を優先して安定版`gemini-3.1-flash-lite`を使用し、API待機時間を15秒に制限しています。Google側の混雑などでタイムアウトする場合は、同じ内容を話し直してください。待機上限は`gemini_config.json`の`request_timeout_seconds`で変更できます。
 
 ### VOICEPEAKが読み上げない
 
