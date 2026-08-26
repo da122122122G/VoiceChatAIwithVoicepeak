@@ -17,6 +17,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $RepositoryRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $VenvPython = Join-Path $RepositoryRoot ".venv\Scripts\python.exe"
+$RequirementsSnapshot = Join-Path $RepositoryRoot ".venv\.requirements.txt"
 $RequirementsFile = Join-Path $RepositoryRoot "requirements.txt"
 $AppConfig = Join-Path $RepositoryRoot "app_config.json"
 $AppConfigExample = Join-Path $RepositoryRoot "app_config.example.json"
@@ -29,6 +30,10 @@ $VoicepeakCoreDll = Join-Path $VoicepeakCoreDirectory "VoicepeakProxyCore.dll"
 $BridgeProject = Join-Path $RepositoryRoot "voicepeak_proxy_test\VoicepeakProxyTest.csproj"
 $BridgeOutput = Join-Path $RepositoryRoot "voicepeak_proxy_test\bin\Release\net48"
 $BridgeExecutable = Join-Path $BridgeOutput "VoicepeakProxyTest.exe"
+$BridgeCoreDll = Join-Path $BridgeOutput "VoicepeakProxyCore.dll"
+$BridgeProgram = Join-Path (Split-Path -Parent $BridgeProject) "Program.cs"
+$BridgeProgramSnapshot = Join-Path $BridgeOutput ".Program.cs.snapshot"
+$BridgeProjectSnapshot = Join-Path $BridgeOutput ".VoicepeakProxyTest.csproj.snapshot"
 
 $WhisperRepository = "https://github.com/ggml-org/whisper.cpp.git"
 $WhisperRevision = "4834a2327d008ace3ec5a9ed00f51454bcabbc1c"
@@ -193,22 +198,6 @@ if ($PythonVersion -lt [version]"3.12") {
 
 Write-Host "Python: $PythonVersion"
 
-$ProcessesToClose = @(
-    Get-Process -Name "voicepeak", "VoicepeakProxyTest" -ErrorAction SilentlyContinue
-)
-
-if ($ProcessesToClose.Count -gt 0) {
-    $ProcessNames = (
-        $ProcessesToClose |
-        ForEach-Object { "$($_.ProcessName) (PID=$($_.Id))" }
-    ) -join ", "
-
-    throw (
-        "セットアップ中はVOICEPEAKとVoicepeakProxyTestを終了してください。" +
-        " 実行中: $ProcessNames"
-    )
-}
-
 Write-Step "app_config.jsonを準備"
 if (-not (Test-Path -LiteralPath $AppConfig)) {
     Copy-Item -LiteralPath $AppConfigExample -Destination $AppConfig
@@ -226,8 +215,34 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
     Invoke-Checked $PythonExecutable $PythonArguments
 }
 
-Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Checked $VenvPython @("-m", "pip", "install", "-r", $RequirementsFile)
+$DependenciesReady = $false
+
+if (Test-Path -LiteralPath $RequirementsSnapshot) {
+    $RequirementsHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $RequirementsFile
+    ).Hash
+    $StoredRequirementsHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $RequirementsSnapshot
+    ).Hash
+
+    if ($StoredRequirementsHash -eq $RequirementsHash) {
+        & $VenvPython -c "import google.genai, numpy, requests, sounddevice" *> $null
+
+        if ($LASTEXITCODE -eq 0) {
+            & $VenvPython -m pip check *> $null
+            $DependenciesReady = $LASTEXITCODE -eq 0
+        }
+    }
+}
+
+if ($DependenciesReady) {
+    Write-Host "Python依存パッケージは更新不要です。"
+}
+else {
+    Invoke-Checked $VenvPython @("-m", "pip", "install", "--upgrade", "pip")
+    Invoke-Checked $VenvPython @("-m", "pip", "install", "-r", $RequirementsFile)
+    Copy-Item -LiteralPath $RequirementsFile -Destination $RequirementsSnapshot -Force
+}
 
 Write-Step "whisper.cppを準備"
 if (-not (Test-Path -LiteralPath $WhisperDirectory)) {
@@ -288,7 +303,6 @@ $CMakeArguments = @(
 if ($WhisperBackend -eq "cuda") {
     $CMakeArguments += "-DCMAKE_BUILD_TYPE=Release"
     $CMakeArguments += "-DGGML_CUDA=ON"
-    $CMakeArguments += "-DCMAKE_CUDA_FLAGS=--diag-suppress=221 -Xcompiler=/utf-8"
 
     if ($CudaArchitectures) {
         $CMakeArguments += "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures"
@@ -421,11 +435,64 @@ else {
     Write-Host "既存のVoicepeakProxyCoreを使用します。"
 }
 
-Write-Step "VOICEPEAK Bridgeをビルド"
-Invoke-Checked "dotnet" @("build", $BridgeProject, "-c", "Release")
-New-Item -ItemType Directory -Force -Path $BridgeOutput | Out-Null
-Copy-Item -Path (Join-Path $VoicepeakCoreDirectory "*") -Destination $BridgeOutput -Recurse -Force
-Get-ChildItem -LiteralPath $BridgeOutput -Recurse -File | Unblock-File
+Write-Step "VOICEPEAK Bridgeを確認"
+$BridgeBuildRequired = (
+    -not (Test-Path -LiteralPath $BridgeExecutable) -or
+    -not (Test-Path -LiteralPath $BridgeCoreDll) -or
+    -not (Test-Path -LiteralPath $BridgeProgramSnapshot) -or
+    -not (Test-Path -LiteralPath $BridgeProjectSnapshot)
+)
+
+if (-not $BridgeBuildRequired) {
+    $SourceCoreHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $VoicepeakCoreDll
+    ).Hash
+    $OutputCoreHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $BridgeCoreDll
+    ).Hash
+    $BridgeBuildRequired = $SourceCoreHash -ne $OutputCoreHash
+}
+
+if (-not $BridgeBuildRequired) {
+    $BridgeTimestamp = (Get-Item -LiteralPath $BridgeExecutable).LastWriteTimeUtc
+    $BridgeInputs = @(
+        Get-Item -LiteralPath $BridgeProject
+        Get-Item -LiteralPath $BridgeProgram
+        Get-ChildItem -LiteralPath $VoicepeakCoreDirectory -Recurse -File
+    )
+    $BridgeBuildRequired = @(
+        $BridgeInputs |
+        Where-Object { $_.LastWriteTimeUtc -gt $BridgeTimestamp }
+    ).Count -gt 0
+}
+
+if ($BridgeBuildRequired) {
+    $ProcessesToClose = @(
+        Get-Process -Name "voicepeak", "VoicepeakProxyTest" -ErrorAction SilentlyContinue
+    )
+
+    if ($ProcessesToClose.Count -gt 0) {
+        $ProcessNames = (
+            $ProcessesToClose |
+            ForEach-Object { "$($_.ProcessName) (PID=$($_.Id))" }
+        ) -join ", "
+
+        throw (
+            "Bridgeの更新時はVOICEPEAKとVoicepeakProxyTestを終了してください。" +
+            " 実行中: $ProcessNames"
+        )
+    }
+
+    Invoke-Checked "dotnet" @("build", $BridgeProject, "-c", "Release")
+    New-Item -ItemType Directory -Force -Path $BridgeOutput | Out-Null
+    Copy-Item -Path (Join-Path $VoicepeakCoreDirectory "*") -Destination $BridgeOutput -Recurse -Force
+    Get-ChildItem -LiteralPath $BridgeOutput -Recurse -File | Unblock-File
+    Copy-Item -LiteralPath $BridgeProgram -Destination $BridgeProgramSnapshot -Force
+    Copy-Item -LiteralPath $BridgeProject -Destination $BridgeProjectSnapshot -Force
+}
+else {
+    Write-Host "VOICEPEAK Bridgeは更新不要です。"
+}
 
 if (-not (Test-Path -LiteralPath $BridgeExecutable)) {
     throw "VOICEPEAK Bridgeが生成されませんでした: $BridgeExecutable"

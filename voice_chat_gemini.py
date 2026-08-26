@@ -1,26 +1,33 @@
-import os
-import subprocess
-import time
-import socket
 import base64
+import io
+import json
+import math
+import os
 import queue
 import re
-import json
+import socket
+import subprocess
 import threading
-
-from datetime import datetime
+import time
+import wave
 
 from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 import requests
 
 from google import genai
 from google.genai import types
 
 WHISPER_SESSION = requests.Session()
+WHISPER_REQUEST_DATA = {
+    "response_format": "json",
+    "temperature": "0.0",
+    "temperature_inc": "0.2",
+}
 
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
@@ -493,29 +500,24 @@ class WhisperServer:
 # VOICEPEAK起動確認
 # ============================================================
 
-def get_voicepeak_paths(
-    require_main_window=False
-):
+def get_voicepeak_processes():
 
     # 日本語パスが文字化けしないよう、
     # PowerShell側でUTF-8を明示する。
-    window_filter = (
-        r"""
-    Where-Object {
-        $_.MainWindowHandle -ne 0 -and
-        $_.MainWindowTitle -match '^VOICEPEAK(?:\s|$)'
-    } |
-"""
-        if require_main_window
-        else ""
-    )
-
     ps_script = r"""
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 Get-Process voicepeak -ErrorAction SilentlyContinue |
-""" + window_filter + r"""
-    ForEach-Object { $_.Path }
+    ForEach-Object {
+        [PSCustomObject]@{
+            path = $_.Path
+            has_main_window = (
+                $_.MainWindowHandle -ne 0 -and
+                $_.MainWindowTitle -match '^VOICEPEAK(?:\s|$)'
+            )
+        }
+    } |
+    ConvertTo-Json -Compress
 """
 
 
@@ -534,15 +536,25 @@ Get-Process voicepeak -ErrorAction SilentlyContinue |
     )
 
 
-    stdout = result.stdout or ""
+    stdout = (result.stdout or "").strip()
 
+    if not stdout:
+        return []
+
+    try:
+        processes = json.loads(stdout)
+    except ValueError as e:
+        raise RuntimeError(
+            "VOICEPEAKのプロセス情報を解析できません。"
+        ) from e
+
+    if isinstance(processes, dict):
+        processes = [processes]
 
     return [
-        line.strip()
-
-        for line in stdout.splitlines()
-
-        if line.strip()
+        process
+        for process in processes
+        if process.get("path")
     ]
 
 
@@ -565,7 +577,11 @@ def wait_for_voicepeak_window(
 
     while time.perf_counter() < deadline:
 
-        process_paths = get_voicepeak_paths()
+        processes = get_voicepeak_processes()
+        process_paths = [
+            process["path"]
+            for process in processes
+        ]
         correct_process_count = normalize_paths(
             process_paths
         ).count(correct_path)
@@ -577,9 +593,11 @@ def wait_for_voicepeak_window(
                 "起動してください。"
             )
 
-        window_paths = get_voicepeak_paths(
-            require_main_window=True
-        )
+        window_paths = [
+            process["path"]
+            for process in processes
+            if process.get("has_main_window")
+        ]
 
         if correct_path in normalize_paths(
             window_paths
@@ -603,7 +621,11 @@ def ensure_voicepeak_running(
     auto_start=True
 ):
 
-    paths = get_voicepeak_paths()
+    processes = get_voicepeak_processes()
+    paths = [
+        process["path"]
+        for process in processes
+    ]
 
 
     correct_path = os.path.normcase(
@@ -692,7 +714,7 @@ def ensure_voicepeak_running(
 # Gemini
 # ============================================================
 
-client = genai.Client()
+client = None
 chat = None
 
 DEFAULT_GEMINI_SETTINGS = {
@@ -773,7 +795,8 @@ def load_conversation_history(max_turns):
         print("会話履歴: まだ記録がありません。")
         return []
 
-    completed_turns = []
+    # 長期間使ってログが大きくなっても、必要な直近分だけを保持する。
+    completed_turns = deque(maxlen=max_turns)
     pending_user_text = None
     skipped_lines = 0
 
@@ -823,7 +846,6 @@ def load_conversation_history(max_turns):
             f"{CONVERSATION_LOG}"
         ) from e
 
-    completed_turns = completed_turns[-max_turns:]
     history = []
 
     for user_text, assistant_text in completed_turns:
@@ -863,6 +885,8 @@ def load_conversation_history(max_turns):
 
 
 def initialize_gemini_chat():
+
+    global client
 
     settings = load_gemini_settings()
     system_instruction = load_system_instruction()
@@ -915,6 +939,8 @@ def initialize_gemini_chat():
         f"{SYSTEM_INSTRUCTION_FILE}"
     )
 
+    client = genai.Client()
+
     return client.chats.create(
         model=model,
         config=types.GenerateContentConfig(
@@ -929,6 +955,48 @@ def initialize_gemini_chat():
 # ============================================================
 
 
+@dataclass(slots=True)
+class Recording:
+    frames: list
+    speech_duration: float
+    ended_by_silence: bool
+
+
+@dataclass(slots=True)
+class DetectorState:
+    threshold: float | None = None
+    above_count: int = 0
+    silence_count: int = 0
+    record_blocks: int = 0
+    speech_span_blocks: int = 0
+    last_voice_span_blocks: int = 0
+    recording: bool = False
+    frames: list = field(default_factory=list)
+    stream_status_count: int = 0
+    capture_drop_count: int = 0
+    detector_error: Exception | None = None
+
+
+def calculate_rms(chunk):
+    """PCM16ブロックのRMSを一時配列1個で計算する。"""
+
+    samples = chunk.reshape(-1).astype(np.float32)
+    mean_square = np.dot(samples, samples) / samples.size
+    return math.sqrt(float(mean_square))
+
+
+def encode_pcm16_wav(audio):
+    """PCM16音声をWhisperへそのまま渡せるWAVバイト列にする。"""
+
+    wav_buffer = io.BytesIO()
+
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(CHANNELS)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(audio.tobytes())
+
+    return wav_buffer.getvalue()
 
 
 def append_conversation_log(role, text):
@@ -959,11 +1027,12 @@ def append_conversation_log(role, text):
         print(f"会話ログ保存エラー: {e}")
 
 
-def process_recording(frames, speech_duration, ended_by_silence, bridge):
+def process_recording(recording, bridge):
 
     block_seconds = AUDIO_BLOCK_SIZE / SAMPLE_RATE
+    frames = recording.frames
 
-    if ended_by_silence:
+    if recording.ended_by_silence:
         trim_seconds = max(
             0.0,
             SILENCE_END_SECONDS - TRAILING_SILENCE_KEEP_SECONDS,
@@ -977,22 +1046,19 @@ def process_recording(frames, speech_duration, ended_by_silence, bridge):
         print("録音データがないためスキップします。")
         return
 
-    audio = np.concatenate(frames, axis=0)
-    duration = len(audio) / SAMPLE_RATE
+    audio = np.concatenate(frames, axis=0).reshape(-1)
+    duration = audio.size / SAMPLE_RATE
+    wav_data = encode_pcm16_wav(audio)
 
-    sf.write(
-        INPUT_WAV,
-        audio,
-        SAMPLE_RATE,
-        subtype="PCM_16",
-    )
+    with open(INPUT_WAV, "wb") as audio_file:
+        audio_file.write(wav_data)
 
     print()
-    print(f"発話時間: {speech_duration:.2f} 秒")
+    print(f"発話時間: {recording.speech_duration:.2f} 秒")
     print(f"録音時間: {duration:.2f} 秒")
     print(f"保存先: {INPUT_WAV}")
 
-    text = transcribe()
+    text = transcribe(wav_data)
 
     if not text:
         print("音声を認識できませんでした。")
@@ -1047,84 +1113,70 @@ def run_continuous_conversation(bridge):
     stop_event = threading.Event()
     pre_buffer = deque(maxlen=pre_roll_blocks)
     calibration_rms = []
-    state = {
-        "threshold": None,
-        "above_count": 0,
-        "silence_count": 0,
-        "record_blocks": 0,
-        "speech_span_blocks": 0,
-        "last_voice_span_blocks": 0,
-        "recording": False,
-        "frames": [],
-        "stream_status_count": 0,
-        "capture_drop_count": 0,
-        "last_input_time": time.perf_counter(),
-        "detector_error": None,
-    }
+    state = DetectorState()
 
     def reset_recording(pre_roll_source):
         pre_buffer.clear()
         pre_buffer.extend(pre_roll_source[-pre_roll_blocks:])
 
-        state["above_count"] = 0
-        state["silence_count"] = 0
-        state["record_blocks"] = 0
-        state["speech_span_blocks"] = 0
-        state["last_voice_span_blocks"] = 0
-        state["recording"] = False
-        state["frames"] = []
+        state.above_count = 0
+        state.silence_count = 0
+        state.record_blocks = 0
+        state.speech_span_blocks = 0
+        state.last_voice_span_blocks = 0
+        state.recording = False
+        state.frames = []
 
     def process_audio_chunk(chunk):
-        samples = chunk.astype(np.float32)
-        rms = float(np.sqrt(np.mean(samples * samples)))
+        rms = calculate_rms(chunk)
 
-        if state["threshold"] is None:
+        if state.threshold is None:
             calibration_rms.append(rms)
             pre_buffer.append(chunk)
 
             if len(calibration_rms) >= calibration_blocks:
                 noise_floor = float(np.median(calibration_rms))
-                state["threshold"] = max(
+                state.threshold = max(
                     MIN_SPEECH_RMS,
                     noise_floor * NOISE_THRESHOLD_MULTIPLIER,
                 )
                 print(
                     f"ノイズレベル: {noise_floor:.1f} / "
-                    f"発話閾値: {state['threshold']:.1f}"
+                    f"発話閾値: {state.threshold:.1f}"
                 )
                 print("発話待機中...")
             return
 
-        is_voice = rms >= state["threshold"]
+        is_voice = rms >= state.threshold
 
-        if not state["recording"]:
+        if not state.recording:
             pre_buffer.append(chunk)
-            state["above_count"] = (
-                state["above_count"] + 1 if is_voice else 0
+            state.above_count = (
+                state.above_count + 1 if is_voice else 0
             )
 
-            if state["above_count"] >= start_blocks:
-                state["recording"] = True
-                state["speech_span_blocks"] = state["above_count"]
-                state["last_voice_span_blocks"] = state["above_count"]
-                state["frames"].extend(pre_buffer)
-                state["record_blocks"] = len(pre_buffer)
+            if state.above_count >= start_blocks:
+                state.recording = True
+                state.speech_span_blocks = state.above_count
+                state.last_voice_span_blocks = state.above_count
+                state.frames.extend(pre_buffer)
+                state.record_blocks = len(pre_buffer)
                 pre_buffer.clear()
                 print("● 発話検出")
             return
 
-        state["frames"].append(chunk)
-        state["record_blocks"] += 1
-        state["speech_span_blocks"] += 1
+        state.frames.append(chunk)
+        state.record_blocks += 1
+        state.speech_span_blocks += 1
 
         if is_voice:
-            state["silence_count"] = 0
-            state["last_voice_span_blocks"] = state["speech_span_blocks"]
+            state.silence_count = 0
+            state.last_voice_span_blocks = state.speech_span_blocks
         else:
-            state["silence_count"] += 1
+            state.silence_count += 1
 
-        ended_by_silence = state["silence_count"] >= silence_blocks
-        reached_maximum = state["record_blocks"] >= max_record_blocks
+        ended_by_silence = state.silence_count >= silence_blocks
+        reached_maximum = state.record_blocks >= max_record_blocks
 
         if not ended_by_silence and not reached_maximum:
             return
@@ -1132,10 +1184,10 @@ def run_continuous_conversation(bridge):
         print("■ 発話終了")
 
         speech_duration = (
-            state["last_voice_span_blocks"]
+            state.last_voice_span_blocks
             * block_seconds
         )
-        completed_frames = state["frames"]
+        completed_frames = state.frames
         pre_roll_source = completed_frames[-pre_roll_blocks:]
 
         if speech_duration < MIN_SPEECH_SECONDS:
@@ -1145,10 +1197,10 @@ def run_continuous_conversation(bridge):
             )
         else:
             audio_queue.put(
-                (
-                    completed_frames,
-                    speech_duration,
-                    ended_by_silence,
+                Recording(
+                    frames=completed_frames,
+                    speech_duration=speech_duration,
+                    ended_by_silence=ended_by_silence,
                 )
             )
             print(
@@ -1178,8 +1230,8 @@ def run_continuous_conversation(bridge):
                 finally:
                     capture_queue.task_done()
 
-                status_count = state["stream_status_count"]
-                drop_count = state["capture_drop_count"]
+                status_count = state.stream_status_count
+                drop_count = state.capture_drop_count
                 now = time.perf_counter()
 
                 if (
@@ -1198,20 +1250,18 @@ def run_continuous_conversation(bridge):
                     last_status_print = now
 
         except Exception as e:
-            state["detector_error"] = e
+            state.detector_error = e
             stop_event.set()
 
     def capture_callback(indata, frames_count, time_info, status):
-        state["last_input_time"] = time.perf_counter()
-
         if status:
-            state["stream_status_count"] += 1
+            state.stream_status_count += 1
 
         try:
             capture_queue.put_nowait(indata.copy())
 
         except queue.Full:
-            state["capture_drop_count"] += 1
+            state.capture_drop_count += 1
 
     detector_thread = threading.Thread(
         target=detector_loop,
@@ -1230,7 +1280,7 @@ def run_continuous_conversation(bridge):
             callback=capture_callback,
         ):
             while True:
-                detector_error = state["detector_error"]
+                detector_error = state.detector_error
 
                 if detector_error is not None:
                     raise RuntimeError(
@@ -1238,20 +1288,14 @@ def run_continuous_conversation(bridge):
                     ) from detector_error
 
                 try:
-                    (
-                        frames,
-                        speech_duration,
-                        ended_by_silence,
-                    ) = audio_queue.get(timeout=0.1)
+                    recording = audio_queue.get(timeout=0.1)
 
                 except queue.Empty:
                     continue
 
                 try:
                     process_recording(
-                        frames,
-                        speech_duration,
-                        ended_by_silence,
+                        recording,
                         bridge,
                     )
 
@@ -1304,7 +1348,7 @@ def clean_transcription(text):
     return cleaned
 
 
-def transcribe():
+def transcribe(wav_data=None):
 
     print()
     print(
@@ -1315,32 +1359,25 @@ def transcribe():
     start = time.perf_counter()
 
 
+    response = None
+
     try:
+        if wav_data is None:
+            with open(INPUT_WAV, "rb") as audio_file:
+                wav_data = audio_file.read()
 
-        with open(
-            INPUT_WAV,
-            "rb"
-        ) as audio_file:
-
-            response = WHISPER_SESSION.post(
-                WHISPER_URL,
-
-                files={
-                    "file": (
-                        "input.wav",
-                        audio_file,
-                        "audio/wav"
-                    )
-                },
-
-                data={
-                    "response_format": "json",
-                    "temperature": "0.0",
-                    "temperature_inc": "0.2",
-                },
-
-                timeout=60,
-            )
+        response = WHISPER_SESSION.post(
+            WHISPER_URL,
+            files={
+                "file": (
+                    "input.wav",
+                    wav_data,
+                    "audio/wav",
+                )
+            },
+            data=WHISPER_REQUEST_DATA,
+            timeout=60,
+        )
 
 
         response.raise_for_status()
@@ -1404,10 +1441,8 @@ def transcribe():
             "不正なJSONが返されました。"
         )
 
-        try:
+        if response is not None:
             print(response.text)
-        except Exception:
-            pass
 
         return ""
 
@@ -1437,6 +1472,31 @@ def transcribe():
 # Gemini
 # ============================================================
 
+def extract_gemini_text(response):
+    """SDKのresponse.textが空でも候補パーツから本文を回収する。"""
+
+    raw_text = getattr(response, "text", None)
+
+    if raw_text:
+        return raw_text.strip()
+
+    text_parts = []
+
+    for candidate in response.candidates or []:
+        content = getattr(candidate, "content", None)
+
+        if content is None:
+            continue
+
+        for part in getattr(content, "parts", None) or []:
+            part_text = getattr(part, "text", None)
+
+            if part_text:
+                text_parts.append(part_text)
+
+    return "".join(text_parts).strip()
+
+
 def ask_gemini_and_speak(text, bridge):
 
     print()
@@ -1453,43 +1513,7 @@ def ask_gemini_and_speak(text, bridge):
             f"【ユーザー発話】{text}"
         )
         response = chat.send_message(message)
-
-        # response.text が None の場合にも対応
-        raw_text = getattr(response, "text", None)
-
-        if raw_text:
-            answer = raw_text.strip()
-
-        else:
-            # 念のため candidates → parts から直接拾う
-            text_parts = []
-
-            for candidate in (response.candidates or []):
-
-                content = getattr(
-                    candidate,
-                    "content",
-                    None
-                )
-
-                if content is None:
-                    continue
-
-                for part in (
-                    getattr(content, "parts", None)
-                    or []
-                ):
-
-                    part_text = getattr(
-                        part,
-                        "text",
-                        None
-                    )
-
-                    if part_text:
-                        text_parts.append(part_text)
-
-            answer = "".join(text_parts).strip()
+        answer = extract_gemini_text(response)
 
 
         elapsed = (

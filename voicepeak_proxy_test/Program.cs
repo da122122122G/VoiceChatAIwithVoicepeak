@@ -2,122 +2,102 @@ using System;
 using System.Text;
 using VoicepeakProxyCore;
 
-class Program
+internal static class Program
 {
-    static string Clean(string text)
-    {
-        if (text == null)
-        {
-            return "";
-        }
+    private const string SpeakPrefix = "SPEAK ";
+    private const string QuitCommand = "QUIT";
 
-        return text
+
+    private static string Clean(string text)
+    {
+        return (text ?? string.Empty)
             .Replace("\r", " ")
             .Replace("\n", " ")
             .Replace("|", "/");
     }
 
 
-    static void Main()
+    private static void WriteResponse(string response)
+    {
+        Console.WriteLine(response);
+        Console.Out.Flush();
+    }
+
+
+    private static void EnqueueSpeech(VoicepeakRuntime runtime, string encoded)
+    {
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(encoded);
+            string text = Encoding.UTF8.GetString(bytes);
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                WriteResponse("ERROR|EmptyText");
+                return;
+            }
+
+            EnqueueResult result = runtime.Enqueue(
+                new SpeakRequest
+                {
+                    Text = text,
+                    Mode = EnqueueMode.Queue,
+                    Interrupt = false
+                }
+            );
+
+            if (result.Succeeded)
+            {
+                WriteResponse($"QUEUED|{result.JobId}");
+                return;
+            }
+
+            WriteResponse(
+                $"ERROR|{result.Status}|{Clean(result.ErrorMessage)}"
+            );
+        }
+        catch (Exception ex)
+        {
+            WriteResponse($"ERROR|Exception|{Clean(ex.Message)}");
+        }
+    }
+
+
+    private static void Main()
     {
         Console.OutputEncoding = new UTF8Encoding(false);
         Console.InputEncoding = Encoding.UTF8;
 
         var config = new AppConfig();
-
-        // 発話開始検知には少し余裕を持たせる
         config.Audio.StartConfirmTimeoutMs = 5000;
-
-        // ====================================================
-        // VoicepeakProxyの常駐ランタイムを一度だけ起動
-        // ====================================================
 
         using (var runtime = VoicepeakRuntime.Start(config))
         {
-            Console.WriteLine("READY");
-            Console.Out.Flush();
+            WriteResponse("READY");
 
             while (true)
             {
                 string line = Console.ReadLine();
 
-                if (line == null)
+                if (line == null || string.Equals(
+                    line,
+                    QuitCommand,
+                    StringComparison.Ordinal
+                ))
                 {
                     break;
                 }
 
-                if (line == "QUIT")
+                if (!line.StartsWith(
+                    SpeakPrefix,
+                    StringComparison.Ordinal
+                ))
                 {
-                    break;
-                }
-
-                if (!line.StartsWith("SPEAK "))
-                {
-                    Console.WriteLine("ERROR|InvalidCommand");
-                    Console.Out.Flush();
+                    WriteResponse("ERROR|InvalidCommand");
                     continue;
                 }
 
-                try
-                {
-                    string encoded = line.Substring(6);
-
-                    byte[] bytes =
-                        Convert.FromBase64String(encoded);
-
-                    string text =
-                        Encoding.UTF8.GetString(bytes);
-
-                    if (string.IsNullOrWhiteSpace(text))
-                    {
-                        Console.WriteLine("ERROR|EmptyText");
-                        Console.Out.Flush();
-                        continue;
-                    }
-
-                    // ============================================
-                    // 常駐Runtimeのキューに発話要求を追加
-                    // ============================================
-
-                    EnqueueResult result =
-                        runtime.Enqueue(
-                            new SpeakRequest
-                            {
-                                Text = text,
-
-                                // 今喋っているものの後ろに追加
-                                Mode = EnqueueMode.Queue,
-
-                                // Queueでは割り込みなし
-                                Interrupt = false
-                            }
-                        );
-
-                    if (result.Succeeded)
-                    {
-                        Console.WriteLine(
-                            $"QUEUED|{result.JobId}"
-                        );
-                    }
-                    else
-                    {
-                        Console.WriteLine(
-                            $"ERROR|" +
-                            $"{result.Status}|" +
-                            $"{Clean(result.ErrorMessage)}"
-                        );
-                    }
-
-                    Console.Out.Flush();
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(
-                        $"ERROR|Exception|{Clean(ex.Message)}"
-                    );
-
-                    Console.Out.Flush();
-                }
+                EnqueueSpeech(runtime, line.Substring(SpeakPrefix.Length));
             }
 
             runtime.Stop();

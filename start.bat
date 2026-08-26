@@ -43,10 +43,30 @@ set "CUDA_ARCH=%CUDA_ARCH: =%"
 set "SETUP_REQUIRED=0"
 
 if not exist ".venv\Scripts\python.exe" set "SETUP_REQUIRED=1"
+if not exist ".venv\.requirements.txt" set "SETUP_REQUIRED=1"
+if exist ".venv\.requirements.txt" (
+    fc.exe /b "requirements.txt" ".venv\.requirements.txt" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+)
 if not exist "%WHISPER_BIN%\whisper-server.exe" set "SETUP_REQUIRED=1"
 if not exist "whisper.cpp\models\ggml-small.bin" set "SETUP_REQUIRED=1"
 if not exist "external\VoicepeakProxyCore\VoicepeakProxyCore.dll" set "SETUP_REQUIRED=1"
 if not exist "voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyTest.exe" set "SETUP_REQUIRED=1"
+if not exist "voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyCore.dll" set "SETUP_REQUIRED=1"
+if exist "voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyCore.dll" (
+    fc.exe /b "external\VoicepeakProxyCore\VoicepeakProxyCore.dll" "voicepeak_proxy_test\bin\Release\net48\VoicepeakProxyCore.dll" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+)
+if not exist "voicepeak_proxy_test\bin\Release\net48\.Program.cs.snapshot" set "SETUP_REQUIRED=1"
+if exist "voicepeak_proxy_test\bin\Release\net48\.Program.cs.snapshot" (
+    fc.exe /b "voicepeak_proxy_test\Program.cs" "voicepeak_proxy_test\bin\Release\net48\.Program.cs.snapshot" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+)
+if not exist "voicepeak_proxy_test\bin\Release\net48\.VoicepeakProxyTest.csproj.snapshot" set "SETUP_REQUIRED=1"
+if exist "voicepeak_proxy_test\bin\Release\net48\.VoicepeakProxyTest.csproj.snapshot" (
+    fc.exe /b "voicepeak_proxy_test\VoicepeakProxyTest.csproj" "voicepeak_proxy_test\bin\Release\net48\.VoicepeakProxyTest.csproj.snapshot" > nul 2>&1
+    if errorlevel 1 set "SETUP_REQUIRED=1"
+)
 if not exist "whisper.cpp\build-voice-chat\CMakeCache.txt" set "SETUP_REQUIRED=1"
 if not exist "whisper.cpp\build-voice-chat\.voice-chat-backend" set "SETUP_REQUIRED=1"
 

@@ -9,6 +9,7 @@
 - 常時リスニングとRMSベースの自動発話検出
 - 起動直後の環境ノイズを基準にした動的な発話閾値
 - 0.3秒のプリロールと末尾無音のトリミング
+- 低割り当てのRMS計算と、WAV再読込を行わないWhisper送信
 - Whisper Serverの自動起動とHTTP接続再利用
 - Geminiとの会話履歴保存・起動時読み込み
 - PCの現在日時とタイムゾーンをGeminiへ通知
@@ -95,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 `
 8. Bridgeの実行先へVoicepeakProxyCore一式を配置
 9. `app_config.json`がなければ設定例から作成
 
-セットアップは再実行できます。既に取得済みのファイルは基本的に再利用します。WhisperモデルとVoicepeakProxyCoreを再取得する場合は`-ForceDownload`を付けます。
+セットアップは再実行できます。既に取得済みのファイルは基本的に再利用します。`requirements.txt`が変わっていなければpip処理を省略し、Bridgeのソースが変わっていなければC#の再ビルドも省略します。WhisperモデルとVoicepeakProxyCoreを再取得する場合は`-ForceDownload`を付けます。
 
 CUDA版の初回ビルドでは多数のCUDAカーネルを生成するため、PCによっては数分以上かかります。2回目以降は構成が変わらない限り再ビルドしません。
 
@@ -324,6 +325,20 @@ PythonからVOICEPEAKを自動起動した場合は、プロセス検出だけ�
 - VOICEPEAKの初回起動ダイアログや確認画面が表示されていないか確認
 - 「バックアップファイルが見つかりました」などで複数起動した場合は、すべて閉じてから1つだけ起動
 - `setup.ps1`を再実行してBridgeを再ビルド
+
+## 開発時の確認
+
+音声処理、ノイズ除去、Gemini本文抽出、会話履歴の直近読み込みは、外部サービスを起動せずに単体テストできます。
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+起動に必要な生成物とCPU／CUDA構成だけを確認する場合は、次を実行します。
+
+```cmd
+start.bat --check
+```
 
 ## 外部プロジェクト
 
