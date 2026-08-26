@@ -95,6 +95,38 @@ class TextUtilityTests(unittest.TestCase):
 
         self.assertEqual(app.extract_gemini_text(response), "前半後半")
 
+    def test_split_voicepeak_text_at_sentence_endings(self):
+        self.assertEqual(
+            app.split_voicepeak_text(
+                "一文目です。『二文目です！』三文目です？"
+            ),
+            [
+                "一文目です。",
+                "『二文目です！』",
+                "三文目です？",
+            ],
+        )
+
+    def test_split_voicepeak_text_keeps_unpunctuated_text(self):
+        self.assertEqual(
+            app.split_voicepeak_text("  短い返答  "),
+            ["短い返答"],
+        )
+
+    def test_speak_gemini_answer_queues_chunks_in_order(self):
+        spoken = []
+        bridge = SimpleNamespace(speak=spoken.append)
+
+        app.speak_gemini_answer(
+            "最初です。次です！最後です",
+            bridge,
+        )
+
+        self.assertEqual(
+            spoken,
+            ["最初です。", "次です！", "最後です"],
+        )
+
 
 class ConversationHistoryTests(unittest.TestCase):
     def test_only_requested_recent_turns_are_loaded(self):

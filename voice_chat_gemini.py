@@ -1566,6 +1566,49 @@ def extract_gemini_text(response):
     return "".join(text_parts).strip()
 
 
+def split_voicepeak_text(text):
+    """返答を文末単位に分け、VOICEPEAKの初回合成を早める。"""
+
+    normalized = re.sub(
+        r"\s+",
+        " ",
+        text or "",
+    ).strip()
+
+    if not normalized:
+        return []
+
+    chunks = re.findall(
+        r".+?(?:[。！？!?]+[」』】）〕〉》”’\"']*|$)",
+        normalized,
+    )
+
+    return [
+        chunk.strip()
+        for chunk in chunks
+        if chunk.strip()
+    ]
+
+
+def speak_gemini_answer(answer, bridge):
+    chunks = split_voicepeak_text(answer)
+
+    if len(chunks) > 1:
+        print(
+            "VOICEPEAK用に文単位で分割: "
+            f"{len(chunks)} 文"
+        )
+
+    for index, chunk in enumerate(chunks, start=1):
+        if len(chunks) > 1:
+            print(
+                "VOICEPEAK送信文: "
+                f"{index}/{len(chunks)}"
+            )
+
+        bridge.speak(chunk)
+
+
 def ask_gemini_and_speak(text, bridge):
 
     print()
@@ -1635,8 +1678,8 @@ def ask_gemini_and_speak(text, bridge):
         )
 
 
-        # 全文を一度だけVOICEPEAKへ
-        bridge.speak(answer)
+        # 先頭文の合成を早く始めるため、文単位で順にキューへ積む。
+        speak_gemini_answer(answer, bridge)
 
         return answer
 
