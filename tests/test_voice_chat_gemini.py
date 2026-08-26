@@ -95,37 +95,74 @@ class TextUtilityTests(unittest.TestCase):
 
         self.assertEqual(app.extract_gemini_text(response), "前半後半")
 
-    def test_split_voicepeak_text_at_sentence_endings(self):
+    def test_sentence_buffer_flushes_completed_and_remaining_text(self):
+        completed, remainder = app.take_voicepeak_sentences(
+            "一文目です。『二文目です！』最後です",
+            flush=True,
+        )
+
         self.assertEqual(
-            app.split_voicepeak_text(
-                "一文目です。『二文目です！』三文目です？"
-            ),
+            completed,
             [
                 "一文目です。",
                 "『二文目です！』",
-                "三文目です？",
+                "最後です",
             ],
         )
+        self.assertEqual(remainder, "")
 
-    def test_split_voicepeak_text_keeps_unpunctuated_text(self):
-        self.assertEqual(
-            app.split_voicepeak_text("  短い返答  "),
-            ["短い返答"],
+    def test_sentence_buffer_waits_for_possible_closing_quote(self):
+        completed, remainder = app.take_voicepeak_sentences(
+            "最初です。",
+            flush=False,
         )
 
-    def test_speak_gemini_answer_queues_chunks_in_order(self):
+        self.assertEqual(completed, [])
+        self.assertEqual(remainder, "最初です。")
+
+        completed, remainder = app.take_voicepeak_sentences(
+            remainder + "」次です",
+            flush=False,
+        )
+
+        self.assertEqual(completed, ["最初です。」"])
+        self.assertEqual(remainder, "次です")
+
+    def test_gemini_stream_queues_first_sentence_before_completion(self):
         spoken = []
+        observed_during_stream = []
+
+        def response_stream(message):
+            yield SimpleNamespace(
+                text="最初です。次",
+                candidates=[],
+            )
+            observed_during_stream.append(list(spoken))
+            yield SimpleNamespace(
+                text="です。",
+                candidates=[],
+            )
+
+        fake_chat = SimpleNamespace(
+            send_message_stream=response_stream
+        )
         bridge = SimpleNamespace(speak=spoken.append)
 
-        app.speak_gemini_answer(
-            "最初です。次です！最後です",
-            bridge,
-        )
+        with patch.object(app, "chat", fake_chat):
+            answer = app.ask_gemini_and_speak(
+                "テスト",
+                bridge,
+            )
 
         self.assertEqual(
-            spoken,
-            ["最初です。", "次です！", "最後です"],
+            observed_during_stream,
+            [["最初です。"]],
         )
+        self.assertEqual(
+            spoken,
+            ["最初です。", "次です。"],
+        )
+        self.assertEqual(answer, "最初です。次です。")
 
 
 class ConversationHistoryTests(unittest.TestCase):

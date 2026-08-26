@@ -1566,47 +1566,95 @@ def extract_gemini_text(response):
     return "".join(text_parts).strip()
 
 
-def split_voicepeak_text(text):
-    """返答を文末単位に分け、VOICEPEAKの初回合成を早める。"""
+def extract_gemini_stream_text(response):
+    """ストリーム断片の前後空白を失わずに本文を取り出す。"""
 
-    normalized = re.sub(
-        r"\s+",
-        " ",
-        text or "",
-    ).strip()
+    raw_text = getattr(response, "text", None)
 
-    if not normalized:
-        return []
+    if raw_text:
+        return raw_text
 
-    chunks = re.findall(
-        r".+?(?:[。！？!?]+[」』】）〕〉》”’\"']*|$)",
-        normalized,
-    )
+    text_parts = []
 
-    return [
-        chunk.strip()
-        for chunk in chunks
-        if chunk.strip()
-    ]
+    for candidate in response.candidates or []:
+        content = getattr(candidate, "content", None)
+
+        if content is None:
+            continue
+
+        for part in getattr(content, "parts", None) or []:
+            part_text = getattr(part, "text", None)
+
+            if part_text:
+                text_parts.append(part_text)
+
+    return "".join(text_parts)
 
 
-def speak_gemini_answer(answer, bridge):
-    chunks = split_voicepeak_text(answer)
+VOICEPEAK_SENTENCE_ENDINGS = frozenset("。！？!?")
+VOICEPEAK_SENTENCE_CLOSERS = frozenset(
+    "」』】）〕〉》”’\"'"
+)
 
-    if len(chunks) > 1:
-        print(
-            "VOICEPEAK用に文単位で分割: "
-            f"{len(chunks)} 文"
-        )
 
-    for index, chunk in enumerate(chunks, start=1):
-        if len(chunks) > 1:
-            print(
-                "VOICEPEAK送信文: "
-                f"{index}/{len(chunks)}"
+def take_voicepeak_sentences(text, flush=False):
+    """完成した文と、次のストリーム断片を待つ残りに分ける。"""
+
+    completed = []
+    start = 0
+    index = 0
+    text_length = len(text)
+
+    while index < text_length:
+        if text[index] not in VOICEPEAK_SENTENCE_ENDINGS:
+            index += 1
+            continue
+
+        boundary = index + 1
+
+        while (
+            boundary < text_length
+            and text[boundary] in VOICEPEAK_SENTENCE_ENDINGS
+        ):
+            boundary += 1
+
+        while (
+            boundary < text_length
+            and (
+                text[boundary] in VOICEPEAK_SENTENCE_CLOSERS
+                or text[boundary].isspace()
             )
+        ):
+            boundary += 1
 
-        bridge.speak(chunk)
+        # 文末直後でストリームが切れた場合、閉じ括弧が次の断片に
+        # 来る可能性があるため、次の文字かストリーム終了まで待つ。
+        if boundary >= text_length and not flush:
+            break
+
+        sentence = re.sub(
+            r"\s+",
+            " ",
+            text[start:boundary],
+        ).strip()
+
+        if sentence:
+            completed.append(sentence)
+
+        start = boundary
+        index = boundary
+
+    remainder = text[start:]
+
+    if flush:
+        remainder = re.sub(r"\s+", " ", remainder).strip()
+
+        if remainder:
+            completed.append(remainder)
+
+        remainder = ""
+
+    return completed, remainder
 
 
 def ask_gemini_and_speak(text, bridge):
@@ -1624,8 +1672,73 @@ def ask_gemini_and_speak(text, bridge):
             f"【システム補足: 現在日時 {current_datetime}】\n"
             f"【ユーザー発話】{text}"
         )
-        response = chat.send_message(message)
-        answer = extract_gemini_text(response)
+        answer_parts = []
+        pending_speech = ""
+        queued_sentences = 0
+        first_sentence_elapsed = None
+        last_response = None
+
+        for response_chunk in chat.send_message_stream(message):
+            last_response = response_chunk
+            chunk_text = extract_gemini_stream_text(
+                response_chunk
+            )
+
+            if not chunk_text:
+                continue
+
+            answer_parts.append(chunk_text)
+            pending_speech += chunk_text
+
+            sentences, pending_speech = (
+                take_voicepeak_sentences(
+                    pending_speech,
+                    flush=False,
+                )
+            )
+
+            for sentence in sentences:
+                queued_sentences += 1
+
+                if first_sentence_elapsed is None:
+                    first_sentence_elapsed = (
+                        time.perf_counter() - start
+                    )
+                    print(
+                        "Gemini先頭文生成: "
+                        f"{first_sentence_elapsed:.2f} 秒"
+                    )
+
+                print(
+                    "VOICEPEAK先行送信: "
+                    f"文{queued_sentences}"
+                )
+                bridge.speak(sentence)
+
+        final_sentences, _ = take_voicepeak_sentences(
+            pending_speech,
+            flush=True,
+        )
+
+        for sentence in final_sentences:
+            queued_sentences += 1
+
+            if first_sentence_elapsed is None:
+                first_sentence_elapsed = (
+                    time.perf_counter() - start
+                )
+                print(
+                    "Gemini先頭文生成: "
+                    f"{first_sentence_elapsed:.2f} 秒"
+                )
+
+            print(
+                "VOICEPEAK先行送信: "
+                f"文{queued_sentences}"
+            )
+            bridge.speak(sentence)
+
+        answer = "".join(answer_parts).strip()
 
 
         elapsed = (
@@ -1645,7 +1758,8 @@ def ask_gemini_and_speak(text, bridge):
 
             # 原因調査用
             for candidate in (
-                response.candidates or []
+                getattr(last_response, "candidates", None)
+                or []
             ):
 
                 finish_reason = getattr(
@@ -1677,9 +1791,6 @@ def ask_gemini_and_speak(text, bridge):
             f"{elapsed:.2f} 秒"
         )
 
-
-        # 先頭文の合成を早く始めるため、文単位で順にキューへ積む。
-        speak_gemini_answer(answer, bridge)
 
         return answer
 
