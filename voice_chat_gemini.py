@@ -141,6 +141,12 @@ WHISPER_BEAM_SIZE = 1
 # Server起動待ち時間
 WHISPER_START_TIMEOUT = 30.0
 
+# CUDAの初回推論で発生する初期化コストを会話前に消化する。
+# この環境では1回目だけでなく2回目も遅くなる場合があるため2回実行する。
+WHISPER_WARMUP_REQUESTS = 2
+WHISPER_WARMUP_AUDIO_SECONDS = 0.25
+WHISPER_WARMUP_TIMEOUT = 30
+
 
 # ------------------------------------------------------------
 # 録音
@@ -320,6 +326,7 @@ class WhisperServer:
         self.owns_process = False
 
         self.start()
+        self._warm_up()
 
 
     def _is_running(self):
@@ -349,6 +356,50 @@ class WhisperServer:
                 pass
 
             self.log_file = None
+
+
+    def _warm_up(self):
+        """短い無音を推論し、CUDAの遅延初期化を会話前に済ませる。"""
+
+        sample_count = max(
+            1,
+            round(
+                SAMPLE_RATE
+                * WHISPER_WARMUP_AUDIO_SECONDS
+            ),
+        )
+        audio = np.zeros(sample_count, dtype=np.int16)
+        wav_data = encode_pcm16_wav(audio)
+
+        print("Whisperをウォームアップ中...")
+        start = time.perf_counter()
+
+        try:
+            for _ in range(WHISPER_WARMUP_REQUESTS):
+                response = WHISPER_SESSION.post(
+                    WHISPER_URL,
+                    files={
+                        "file": (
+                            "warmup.wav",
+                            wav_data,
+                            "audio/wav",
+                        )
+                    },
+                    data=WHISPER_REQUEST_DATA,
+                    timeout=WHISPER_WARMUP_TIMEOUT,
+                )
+                response.raise_for_status()
+
+        except requests.exceptions.RequestException as e:
+            # ウォームアップ失敗だけでアプリ全体は停止させない。
+            print(f"Whisperウォームアップ警告: {e}")
+            return
+
+        elapsed = time.perf_counter() - start
+        print(
+            "Whisperウォームアップ完了: "
+            f"{elapsed:.2f} 秒"
+        )
 
 
     def start(self):

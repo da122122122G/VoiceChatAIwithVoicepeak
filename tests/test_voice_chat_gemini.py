@@ -36,6 +36,37 @@ class AudioUtilityTests(unittest.TestCase):
             self.assertEqual(wav_file.readframes(audio.size), audio.tobytes())
 
 
+class WhisperServerTests(unittest.TestCase):
+    def test_warmup_runs_configured_number_of_requests(self):
+        response = SimpleNamespace(raise_for_status=lambda: None)
+
+        with (
+            patch.object(app.WhisperServer, "start"),
+            patch.object(
+                app.WHISPER_SESSION,
+                "post",
+                return_value=response,
+            ) as post,
+        ):
+            app.WhisperServer()
+
+        self.assertEqual(
+            post.call_count,
+            app.WHISPER_WARMUP_REQUESTS,
+        )
+
+        wav_data = post.call_args.kwargs["files"]["file"][1]
+
+        with wave.open(io.BytesIO(wav_data), "rb") as wav_file:
+            self.assertEqual(
+                wav_file.getnframes(),
+                round(
+                    app.SAMPLE_RATE
+                    * app.WHISPER_WARMUP_AUDIO_SECONDS
+                ),
+            )
+
+
 class TextUtilityTests(unittest.TestCase):
     def test_clean_transcription_removes_noise_only_text(self):
         self.assertEqual(app.clean_transcription("（音楽）"), "")
