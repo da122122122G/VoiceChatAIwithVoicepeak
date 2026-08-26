@@ -69,6 +69,16 @@ internal static class Program
         Console.InputEncoding = Encoding.UTF8;
 
         var config = new AppConfig();
+
+        // 音声会話向けの低遅延設定。
+        // 入力直後の再生失敗を避ける最低限の待機は残す。
+        config.InputTiming.PostTypeWaitMinMs = 100;
+        config.InputTiming.PostTypeWaitPerCharMs = 3;
+        config.Ui.DelayBeforePlayShortcutMs = 5;
+        config.Audio.PollIntervalMs = 20;
+        config.Audio.StopConfirmMs = 120;
+
+        // これは固定待機ではなく、再生開始を検出できない場合の上限。
         config.Audio.StartConfirmTimeoutMs = 5000;
 
         using (var runtime = VoicepeakRuntime.Start(config))
